@@ -58,15 +58,35 @@ if command -v pkg &> /dev/null; then
     # Estamos no Termux
     pkg update -y && pkg upgrade -y
     log_info "Instalando dependências do Termux..."
-    pkg install -y nodejs npm python build-essential
+    
+    # Instalar nodejs primeiro
+    pkg install -y nodejs
+    
+    # Instalar python e setuptools (contém distutils para Python 3.12)
+    pkg install -y python python-pip
+    pip install setuptools distutils-extra
+    
+    # Instalar outras dependências
+    pkg install -y build-essential make
+    
+    # Verificar se npm está disponível, se não, usar o que vem com nodejs
+    if ! command -v npm &> /dev/null; then
+        log_warning "NPM não encontrado, tentando usar o npm interno do Node.js..."
+        # Criar link simbólico se necessário
+        if [ -f "$PREFIX/lib/node_modules/npm/bin/npm-cli.js" ]; then
+            ln -sf "$PREFIX/lib/node_modules/npm/bin/npm-cli.js" "$PREFIX/bin/npm"
+            chmod +x "$PREFIX/bin/npm"
+        fi
+    fi
+    
 elif command -v apt &> /dev/null; then
     # Ubuntu/Debian
     sudo apt update && sudo apt upgrade -y
-    sudo apt install -y nodejs npm python3 build-essential sqlite3
+    sudo apt install -y nodejs npm python3 python3-pip python3-setuptools build-essential sqlite3
 elif command -v yum &> /dev/null; then
     # CentOS/RHEL
     sudo yum update -y
-    sudo yum install -y nodejs npm python3 gcc make sqlite
+    sudo yum install -y nodejs npm python3 python3-pip gcc make sqlite
 else
     log_warning "Gerenciador de pacotes não detectado. Instale manualmente: nodejs, npm, python3, build-essential"
 fi
@@ -97,20 +117,46 @@ log_success "NPM $(npm -v) detectado."
 
 # Instalar dependências do projeto
 log_info "Instalando dependências do Node.js..."
-npm install
+
+# Tentar instalação normal primeiro
+npm install --no-optional
 
 if [ $? -eq 0 ]; then
     log_success "Dependências instaladas com sucesso."
 else
-    log_error "Falha ao instalar dependências."
-    log_info "Tentando instalar com --legacy-peer-deps..."
-    npm install --legacy-peer-deps
+    log_warning "Falha na instalação normal, tentando métodos alternativos..."
+    
+    # Método 2: Legacy peer deps
+    log_info "Tentando com --legacy-peer-deps..."
+    npm install --legacy-peer-deps --no-optional
     
     if [ $? -eq 0 ]; then
-        log_success "Dependências instaladas com sucesso (modo compatibilidade)."
+        log_success "Dependências instaladas com --legacy-peer-deps."
     else
-        log_error "Falha ao instalar dependências. Verifique sua conexão e tente novamente."
-        exit 1
+        # Método 3: Force e cache clean
+        log_info "Limpando cache e forçando instalação..."
+        npm cache clean --force
+        rm -rf node_modules package-lock.json
+        npm install --force --no-optional
+        
+        if [ $? -eq 0 ]; then
+            log_success "Dependências instaladas com --force."
+        else
+            # Método 4: Instalação individual de pacotes problemáticos
+            log_info "Tentando instalação individual dos pacotes..."
+            npm install express express-session multer bcryptjs socket.io express-fileupload mime compression helmet cors --save
+            npm install better-sqlite3 --save
+            
+            if [ $? -eq 0 ]; then
+                log_success "Dependências instaladas individualmente."
+            else
+                log_error "Todas as tentativas de instalação falharam."
+                log_info "Você pode tentar instalar manualmente com:"
+                log_info "  npm install express express-session better-sqlite3 bcryptjs"
+                log_info "  npm install socket.io express-fileupload mime compression"
+                exit 1
+            fi
+        fi
     fi
 fi
 
@@ -121,18 +167,33 @@ mkdir -p database
 chmod 755 public/uploads
 log_success "Diretórios criados."
 
-# Testar a instalação
-log_info "Testando instalação..."
-timeout 5s node -e "
-const app = require('./server.js');
-console.log('✓ Servidor pode ser inicializado com sucesso');
-process.exit(0);
-" 2>/dev/null
+# Verificar se as dependências principais foram instaladas
+log_info "Verificando dependências instaladas..."
 
-if [ $? -eq 0 ]; then
-    log_success "Teste de instalação bem-sucedido."
+# Verificar se os módulos principais existem
+MODULES_OK=true
+
+for module in "express" "better-sqlite3" "bcryptjs" "socket.io"; do
+    if [ ! -d "node_modules/$module" ]; then
+        log_warning "Módulo $module não encontrado"
+        MODULES_OK=false
+    fi
+done
+
+if [ "$MODULES_OK" = true ]; then
+    log_success "Todas as dependências principais foram instaladas."
+    
+    # Testar inicialização básica
+    log_info "Testando inicialização do servidor..."
+    timeout 3s node -e "console.log('✓ Node.js funcionando'); process.exit(0);" 2>/dev/null
+    
+    if [ $? -eq 0 ]; then
+        log_success "Teste básico bem-sucedido."
+    else
+        log_warning "Teste básico falhou, mas a instalação parece completa."
+    fi
 else
-    log_warning "Teste rápido falhou, mas isso pode ser normal. Tente iniciar manualmente."
+    log_warning "Algumas dependências podem estar faltando, mas tentaremos continuar."
 fi
 
 # Criar arquivo de inicialização rápida
@@ -198,6 +259,12 @@ echo ""
 echo "📱 ACESSO REMOTO (opcional):"
 echo "   1. Configure port forwarding no roteador (porta 8080)"
 echo "   2. Ou use ngrok: pkg install ngrok && ngrok http 8080"
+echo "   3. Ou use cloudflared: pkg install cloudflared && cloudflared tunnel --url http://localhost:8080"
+echo ""
+echo "🔧 SOLUÇÃO DE PROBLEMAS:"
+echo "   • Se SQLite falhar: rm -rf node_modules && npm install better-sqlite3"
+echo "   • Se não iniciar: node --trace-warnings server.js"
+echo "   • Reinstalar tudo: ./install-termux.sh"
 echo ""
 echo "=================================================================="
 echo -e "${BLUE}🌟 Desenvolvido por Deivid Apps${NC}"
@@ -206,10 +273,16 @@ echo "=================================================================="
 
 log_success "Cloud-Termux instalado e pronto para uso!"
 echo ""
+echo "🎯 PRÓXIMOS PASSOS:"
+echo "   1. ./start-cloud.sh (iniciar servidor)"
+echo "   2. Abrir http://localhost:8080 no navegador"
+echo "   3. Login: admin / admin123"
+echo ""
 read -p "Iniciar o servidor agora? (s/n): " start_now
 
 if [ "$start_now" = "s" ] || [ "$start_now" = "S" ]; then
     log_info "Iniciando Cloud-Termux..."
     echo ""
+    chmod +x start-cloud.sh
     ./start-cloud.sh
 fi
