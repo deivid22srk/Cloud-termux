@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cloud-Termux - Dashboard</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f5f5f5;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: 250px 1fr;
+            grid-template-rows: 60px 1fr;
+            grid-template-areas: 
+                "sidebar header"
+                "sidebar main";
+            height: 100vh;
+        }
+
+        .header {
+            grid-area: header;
+            background: white;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 30px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            z-index: 100;
+        }
+
+        .header h1 {
+            font-size: 1.5rem;
+            color: #333;
+        }
+
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .user-avatar {
+            width: 36px;
+            height: 36px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+        }
+
+        .logout-btn {
+            background: #e53e3e;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+
+        .logout-btn:hover {
+            background: #c53030;
+        }
+
+        .sidebar {
+            grid-area: sidebar;
+            background: linear-gradient(135deg, #2d3748, #4a5568);
+            color: white;
+            padding: 0;
+            box-shadow: 2px 0 4px rgba(0,0,0,0.1);
+        }
+
+        .sidebar-header {
+            padding: 20px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .sidebar-header h2 {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 1.3rem;
+        }
+
+        .nav-menu {
+            list-style: none;
+            padding: 10px 0;
+        }
+
+        .nav-item {
+            margin: 5px 0;
+        }
+
+        .nav-link {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            color: white;
+            text-decoration: none;
+            padding: 12px 20px;
+            transition: background 0.3s ease;
+            border-left: 3px solid transparent;
+        }
+
+        .nav-link:hover, .nav-link.active {
+            background: rgba(255,255,255,0.1);
+            border-left-color: #667eea;
+        }
+
+        .main-content {
+            grid-area: main;
+            padding: 30px;
+            overflow-y: auto;
+            background: #f5f5f5;
+        }
+
+        .module {
+            display: none;
+        }
+
+        .module.active {
+            display: block;
+        }
+
+        .module-header {
+            display: flex;
+            justify-content: between;
+            align-items: center;
+            margin-bottom: 25px;
+        }
+
+        .module-title {
+            font-size: 2rem;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.07);
+            margin-bottom: 20px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.07);
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+        }
+
+        .stat-number {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 8px;
+        }
+
+        .stat-label {
+            color: #666;
+            font-size: 0.9rem;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 16px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #e53e3e, #c53030);
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, #38a169, #2f855a);
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+        }
+
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: border-color 0.3s ease;
+        }
+
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+
+        .table th,
+        .table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .table th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .table tr:hover {
+            background: #f8f9fa;
+        }
+
+        .upload-area {
+            border: 2px dashed #667eea;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            background: #f8f9ff;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 20px;
+        }
+
+        .upload-area:hover {
+            border-color: #764ba2;
+            background: #f0f4ff;
+        }
+
+        .upload-area.dragover {
+            border-color: #38a169;
+            background: #f0fff4;
+        }
+
+        .chat-container {
+            height: 400px;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid #e0e0e0;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #f8f9fa;
+        }
+
+        .chat-input-area {
+            padding: 15px;
+            background: white;
+            border-top: 1px solid #e0e0e0;
+            display: flex;
+            gap: 10px;
+        }
+
+        .chat-input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            resize: none;
+            height: 40px;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            padding: 10px 15px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        .message-header {
+            font-weight: bold;
+            color: #667eea;
+            font-size: 0.9rem;
+            margin-bottom: 5px;
+        }
+
+        .message-time {
+            color: #999;
+            font-size: 0.8rem;
+            float: right;
+        }
+
+        .calendar-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 1px;
+            background: #e0e0e0;
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+
+        .calendar-day {
+            background: white;
+            padding: 15px 10px;
+            text-align: center;
+            min-height: 80px;
+            position: relative;
+        }
+
+        .calendar-day.header {
+            background: #667eea;
+            color: white;
+            font-weight: bold;
+            padding: 10px;
+            min-height: auto;
+        }
+
+        .calendar-day.other-month {
+            background: #f8f9fa;
+            color: #999;
+        }
+
+        .event-dot {
+            width: 6px;
+            height: 6px;
+            background: #38a169;
+            border-radius: 50%;
+            position: absolute;
+            bottom: 5px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            backdrop-filter: blur(5px);
+        }
+
+        .modal-content {
+            background: white;
+            margin: 5% auto;
+            padding: 30px;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 500px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .close {
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: #999;
+            transition: color 0.3s ease;
+        }
+
+        .close:hover {
+            color: #333;
+        }
+
+        .notes-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .note-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.07);
+            border-left: 4px solid #667eea;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .note-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+        }
+
+        .note-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .note-content {
+            color: #666;
+            font-size: 0.9rem;
+            line-height: 1.4;
+        }
+
+        .note-meta {
+            margin-top: 15px;
+            padding-top: 10px;
+            border-top: 1px solid #f0f0f0;
+            font-size: 0.8rem;
+            color: #999;
+        }
+
+        @media (max-width: 768px) {
+            .dashboard {
+                grid-template-columns: 1fr;
+                grid-template-rows: 60px auto 1fr;
+                grid-template-areas: 
+                    "header"
+                    "sidebar"
+                    "main";
+            }
+
+            .sidebar {
+                max-height: 200px;
+                overflow-y: auto;
+            }
+
+            .main-content {
+                padding: 20px 15px;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            }
+
+            .modal-content {
+                width: 95%;
+                margin: 10% auto;
+                padding: 20px;
+            }
+
+            .notes-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <header class="header">
+            <h1 id="currentModuleTitle">Dashboard</h1>
+            <div class="user-info">
+                <div class="user-avatar" id="userAvatar">A</div>
+                <span id="userName">Admin</span>
+                <button class="logout-btn" onclick="logout()">
+                    <i class="fas fa-sign-out-alt"></i> Sair
+                </button>
+            </div>
+        </header>
+
+        <nav class="sidebar">
+            <div class="sidebar-header">
+                <h2><i class="fas fa-cloud"></i> Cloud-Termux</h2>
+            </div>
+            <ul class="nav-menu">
+                <li class="nav-item">
+                    <a href="#" class="nav-link active" data-module="dashboard">
+                        <i class="fas fa-tachometer-alt"></i>
+                        Dashboard
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#" class="nav-link" data-module="files">
+                        <i class="fas fa-folder"></i>
+                        Arquivos
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#" class="nav-link" data-module="contacts">
+                        <i class="fas fa-address-book"></i>
+                        Contatos
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#" class="nav-link" data-module="calendar">
+                        <i class="fas fa-calendar"></i>
+                        Calendário
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#" class="nav-link" data-module="notes">
+                        <i class="fas fa-sticky-note"></i>
+                        Notas
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#" class="nav-link" data-module="chat">
+                        <i class="fas fa-comments"></i>
+                        Chat
+                    </a>
+                </li>
+            </ul>
+        </nav>
+
+        <main class="main-content">
+            <!-- Dashboard Module -->
+            <div id="dashboard" class="module active">
+                <div class="module-header">
+                    <h2 class="module-title">
+                        <i class="fas fa-tachometer-alt"></i>
+                        Dashboard
+                    </h2>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-number" id="filesCount">0</div>
+                        <div class="stat-label">Arquivos</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number" id="contactsCount">0</div>
+                        <div class="stat-label">Contatos</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number" id="eventsCount">0</div>
+                        <div class="stat-label">Eventos</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number" id="notesCount">0</div>
+                        <div class="stat-label">Notas</div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3>Bem-vindo ao Cloud-Termux!</h3>
+                    <p>Sua plataforma de nuvem pessoal inspirada no Nextcloud. Gerencie arquivos, contatos, calendário, notas e chat em um só lugar.</p>
+                    <div style="margin-top: 20px;">
+                        <button class="btn" onclick="showModule('files')">
+                            <i class="fas fa-upload"></i>
+                            Enviar Primeiro Arquivo
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Files Module -->
+            <div id="files" class="module">
+                <div class="module-header">
+                    <h2 class="module-title">
+                        <i class="fas fa-folder"></i>
+                        Gerenciador de Arquivos
+                    </h2>
+                </div>
+
+                <div class="card">
+                    <div class="upload-area" id="uploadArea">
+                        <i class="fas fa-cloud-upload-alt" style="font-size: 3rem; color: #667eea; margin-bottom: 15px;"></i>
+                        <h3>Arraste arquivos aqui ou clique para selecionar</h3>
+                        <p>Máximo 50MB por arquivo</p>
+                        <input type="file" id="fileInput" multiple style="display: none;">
+                    </div>
+
+                    <div id="uploadProgress" style="display: none; margin-top: 20px;">
+                        <div style="background: #e0e0e0; border-radius: 10px; overflow: hidden;">
+                            <div id="progressBar" style="height: 20px; background: linear-gradient(135deg, #667eea, #764ba2); width: 0%; transition: width 0.3s ease;"></div>
+                        </div>
+                        <p id="uploadStatus" style="margin-top: 10px; text-align: center;"></p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3>Meus Arquivos</h3>
+                    <div id="filesList">
+                        <p>Carregando arquivos...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Contacts Module -->
+            <div id="contacts" class="module">
+                <div class="module-header">
+                    <h2 class="module-title">
+                        <i class="fas fa-address-book"></i>
+                        Contatos
+                    </h2>
+                    <button class="btn" onclick="showModal('contactModal')">
+                        <i class="fas fa-plus"></i>
+                        Novo Contato
+                    </button>
+                </div>
+
+                <div class="card">
+                    <div id="contactsList">
+                        <p>Carregando contatos...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Calendar Module -->
+            <div id="calendar" class="module">
+                <div class="module-header">
+                    <h2 class="module-title">
+                        <i class="fas fa-calendar"></i>
+                        Calendário
+                    </h2>
+                    <button class="btn" onclick="showModal('eventModal')">
+                        <i class="fas fa-plus"></i>
+                        Novo Evento
+                    </button>
+                </div>
+
+                <div class="card">
+                    <div id="calendarContainer">
+                        <div class="calendar-grid" id="calendarGrid">
+                            <!-- Calendar will be generated here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Notes Module -->
+            <div id="notes" class="module">
+                <div class="module-header">
+                    <h2 class="module-title">
+                        <i class="fas fa-sticky-note"></i>
+                        Notas
+                    </h2>
+                    <button class="btn" onclick="showModal('noteModal')">
+                        <i class="fas fa-plus"></i>
+                        Nova Nota
+                    </button>
+                </div>
+
+                <div class="notes-grid" id="notesList">
+                    <p>Carregando notas...</p>
+                </div>
+            </div>
+
+            <!-- Chat Module -->
+            <div id="chat" class="module">
+                <div class="module-header">
+                    <h2 class="module-title">
+                        <i class="fas fa-comments"></i>
+                        Chat
+                    </h2>
+                </div>
+
+                <div class="card">
+                    <div class="chat-container">
+                        <div class="chat-messages" id="chatMessages">
+                            <!-- Messages will appear here -->
+                        </div>
+                        <div class="chat-input-area">
+                            <textarea class="chat-input" id="messageInput" placeholder="Digite sua mensagem..." rows="1"></textarea>
+                            <button class="btn" onclick="sendMessage()">
+                                <i class="fas fa-paper-plane"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Modals -->
+    <!-- Contact Modal -->
+    <div id="contactModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Novo Contato</h3>
+                <span class="close" onclick="hideModal('contactModal')">&times;</span>
+            </div>
+            <form id="contactForm">
+                <div class="form-group">
+                    <label for="contactName">Nome</label>
+                    <input type="text" id="contactName" required>
+                </div>
+                <div class="form-group">
+                    <label for="contactEmail">Email</label>
+                    <input type="email" id="contactEmail">
+                </div>
+                <div class="form-group">
+                    <label for="contactPhone">Telefone</label>
+                    <input type="tel" id="contactPhone">
+                </div>
+                <div class="form-group">
+                    <label for="contactNotes">Notas</label>
+                    <textarea id="contactNotes" rows="3"></textarea>
+                </div>
+                <button type="submit" class="btn">Salvar Contato</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Event Modal -->
+    <div id="eventModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Novo Evento</h3>
+                <span class="close" onclick="hideModal('eventModal')">&times;</span>
+            </div>
+            <form id="eventForm">
+                <div class="form-group">
+                    <label for="eventTitle">Título</label>
+                    <input type="text" id="eventTitle" required>
+                </div>
+                <div class="form-group">
+                    <label for="eventDescription">Descrição</label>
+                    <textarea id="eventDescription" rows="3"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="eventStartDate">Data/Hora Início</label>
+                    <input type="datetime-local" id="eventStartDate" required>
+                </div>
+                <div class="form-group">
+                    <label for="eventEndDate">Data/Hora Fim</label>
+                    <input type="datetime-local" id="eventEndDate">
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="eventAllDay">
+                        Dia inteiro
+                    </label>
+                </div>
+                <button type="submit" class="btn">Salvar Evento</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Note Modal -->
+    <div id="noteModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Nova Nota</h3>
+                <span class="close" onclick="hideModal('noteModal')">&times;</span>
+            </div>
+            <form id="noteForm">
+                <div class="form-group">
+                    <label for="noteTitle">Título</label>
+                    <input type="text" id="noteTitle" required>
+                </div>
+                <div class="form-group">
+                    <label for="noteContent">Conteúdo</label>
+                    <textarea id="noteContent" rows="8"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="noteTags">Tags (separadas por vírgula)</label>
+                    <input type="text" id="noteTags" placeholder="trabalho, pessoal, importante">
+                </div>
+                <button type="submit" class="btn">Salvar Nota</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="js/dashboard.js"></script>
+</body>
+</html>
