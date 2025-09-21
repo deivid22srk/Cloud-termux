@@ -117,11 +117,23 @@ function initializeSocket() {
     
     socket.on('download_completed', (data) => {
         updateDownloadStatus(data.downloadId, 'completed');
-        loadDownloads(); // Recarregar lista
+        showNotification('Download concluído!', 'success');
+        setTimeout(() => loadDownloads(), 1000);
     });
     
     socket.on('download_error', (data) => {
         updateDownloadStatus(data.downloadId, 'error', data.error);
+        showNotification(`Erro no download: ${data.error}`, 'error');
+    });
+    
+    socket.on('download_paused', (data) => {
+        updateDownloadStatus(data.downloadId, 'paused');
+        showNotification('Download pausado', 'info');
+    });
+    
+    socket.on('download_cancelled', (data) => {
+        showNotification('Download cancelado', 'info');
+        setTimeout(() => loadDownloads(), 500);
     });
     
     // Eventos de upload
@@ -1152,7 +1164,13 @@ function displayDownloads() {
     const downloadsList = document.getElementById('downloadsList');
     
     if (downloads.length === 0) {
-        downloadsList.innerHTML = '<p>Nenhum download encontrado. Adicione o primeiro download!</p>';
+        downloadsList.innerHTML = `
+            <div style="text-align: center; padding: 3rem; color: var(--text-secondary);">
+                <i class="fas fa-download" style="font-size: 3rem; margin-bottom: 1rem; opacity: 0.5;"></i>
+                <p>Nenhum download encontrado.</p>
+                <p style="font-size: 0.9rem; margin-top: 0.5rem;">Clique em "Novo Download" para começar!</p>
+            </div>
+        `;
         return;
     }
     
@@ -1162,15 +1180,30 @@ function displayDownloads() {
         const speed = download.download_speed || 0;
         const downloadedSize = download.downloaded_size || 0;
         const totalSize = download.file_size || 0;
+        const createdAt = new Date(download.created_at).toLocaleString();
+        
+        // Calcular tempo estimado
+        let eta = '';
+        if (status === 'downloading' && speed > 0 && totalSize > downloadedSize) {
+            const remainingBytes = totalSize - downloadedSize;
+            const remainingSeconds = remainingBytes / speed;
+            eta = formatTime(remainingSeconds);
+        }
         
         return `
             <div class="download-item" id="download-${download.id}">
                 <div class="download-header">
-                    <div>
+                    <div style="flex: 1;">
                         <div class="download-filename">
-                            <i class="fas fa-download"></i> ${download.original_filename || download.filename}
+                            <i class="fas fa-file-download"></i> 
+                            <span title="${download.url}">${download.original_filename || download.filename}</span>
                         </div>
-                        <div class="download-url">${download.url}</div>
+                        <div class="download-url" title="${download.url}">
+                            ${truncateUrl(download.url, 60)}
+                        </div>
+                        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem;">
+                            Criado em: ${createdAt}
+                        </div>
                     </div>
                     <div class="download-controls">
                         <span class="status-badge status-${status}">${getStatusText(status)}</span>
@@ -1178,27 +1211,43 @@ function displayDownloads() {
                     </div>
                 </div>
                 
-                ${status === 'downloading' || status === 'paused' || progress > 0 ? `
+                ${(status === 'downloading' || status === 'paused' || progress > 0) && totalSize > 0 ? `
                     <div class="download-progress-container">
                         <div class="download-progress-bar">
                             <div class="download-progress-fill" style="width: ${progress}%"></div>
                         </div>
                         <div class="download-stats">
-                            <span>${formatFileSize(downloadedSize)} / ${totalSize > 0 ? formatFileSize(totalSize) : 'Desconhecido'}</span>
-                            <span>${progress.toFixed(1)}%</span>
+                            <span><strong>${formatFileSize(downloadedSize)}</strong> / ${formatFileSize(totalSize)}</span>
+                            <span><strong>${progress.toFixed(1)}%</strong></span>
                             <span>${speed > 0 ? formatSpeed(speed) : '-'}</span>
+                            ${eta ? `<span>ETA: ${eta}</span>` : ''}
                         </div>
                     </div>
                 ` : ''}
                 
                 ${download.error_message ? `
-                    <div style="color: #e53e3e; font-size: 0.9rem; margin-top: 10px;">
-                        <i class="fas fa-exclamation-triangle"></i> ${download.error_message}
+                    <div style="color: var(--danger); font-size: 0.9rem; margin-top: 1rem; padding: 0.75rem; background: rgba(239, 68, 68, 0.1); border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.2);">
+                        <i class="fas fa-exclamation-triangle"></i> <strong>Erro:</strong> ${download.error_message}
                     </div>
                 ` : ''}
             </div>
         `;
     }).join('');
+}
+
+function truncateUrl(url, maxLength) {
+    if (url.length <= maxLength) return url;
+    const start = url.substring(0, 30);
+    const end = url.substring(url.length - (maxLength - 35));
+    return start + '...' + end;
+}
+
+function formatTime(seconds) {
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return `${hours}h ${minutes}m`;
 }
 
 function getStatusText(status) {
@@ -1217,22 +1266,26 @@ function getDownloadControls(download) {
     let controls = '';
     
     if (status === 'downloading') {
-        controls += `<button class="btn btn-pause btn-sm" onclick="pauseDownload(${download.id})">
+        controls += `<button class="btn btn-pause btn-sm" onclick="pauseDownload(${download.id})" title="Pausar download">
                         <i class="fas fa-pause"></i>
                      </button>`;
-    } else if (status === 'paused') {
-        controls += `<button class="btn btn-resume btn-sm" onclick="resumeDownload(${download.id})">
+    } else if (status === 'paused' || status === 'error') {
+        controls += `<button class="btn btn-resume btn-sm" onclick="resumeDownload(${download.id})" title="Resumir download">
                         <i class="fas fa-play"></i>
                      </button>`;
-    } else if (status === 'completed') {
-        controls += `<button class="btn btn-download btn-sm" onclick="window.open('/api/download/${download.id}', '_blank')">
+    } else if (status === 'completed' && download.file_path) {
+        controls += `<button class="btn btn-download btn-sm" onclick="window.open('/api/download/${download.id}', '_blank')" title="Baixar arquivo">
                         <i class="fas fa-download"></i>
                      </button>`;
     }
     
     if (status !== 'completed') {
-        controls += `<button class="btn btn-cancel btn-sm" onclick="cancelDownload(${download.id})">
+        controls += `<button class="btn btn-cancel btn-sm" onclick="cancelDownload(${download.id})" title="Cancelar download">
                         <i class="fas fa-times"></i>
+                     </button>`;
+    } else {
+        controls += `<button class="btn btn-danger btn-sm" onclick="cancelDownload(${download.id})" title="Remover da lista">
+                        <i class="fas fa-trash"></i>
                      </button>`;
     }
     
@@ -1246,9 +1299,22 @@ function setupDownloadForm() {
         const url = document.getElementById('downloadUrl').value.trim();
         
         if (!url) {
-            alert('URL é obrigatória');
+            showNotification('URL é obrigatória', 'error');
             return;
         }
+        
+        // Validar URL
+        try {
+            new URL(url);
+        } catch (error) {
+            showNotification('URL inválida. Verifique se começa com http:// ou https://', 'error');
+            return;
+        }
+        
+        const submitBtn = e.target.querySelector('button[type="submit"]');
+        const originalText = submitBtn.innerHTML;
+        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Analisando...';
+        submitBtn.disabled = true;
         
         try {
             const response = await fetch('/api/downloads', {
@@ -1257,77 +1323,140 @@ function setupDownloadForm() {
                 body: JSON.stringify({ url })
             });
 
+            const result = await response.json();
+            
             if (response.ok) {
                 hideModal('downloadModal');
                 document.getElementById('downloadForm').reset();
+                
+                if (result.warning) {
+                    showNotification(result.warning, 'warning');
+                } else {
+                    showNotification(`Download iniciado: ${result.filename}`, 'success');
+                }
+                
                 loadDownloads();
             } else {
-                const error = await response.json();
-                alert(error.error || 'Erro ao criar download');
+                showNotification(result.error || 'Erro ao criar download', 'error');
             }
         } catch (error) {
             console.error('Erro ao criar download:', error);
-            alert('Erro ao criar download');
+            showNotification('Erro de conexão ao criar download', 'error');
+        } finally {
+            submitBtn.innerHTML = originalText;
+            submitBtn.disabled = false;
         }
     });
 }
 
 async function pauseDownload(downloadId) {
+    const downloadElement = document.getElementById(`download-${downloadId}`);
+    const pauseBtn = downloadElement?.querySelector('.btn-pause');
+    
+    if (pauseBtn) {
+        pauseBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+        pauseBtn.disabled = true;
+    }
+    
     try {
         const response = await fetch(`/api/downloads/${downloadId}/pause`, {
             method: 'POST'
         });
         
+        const result = await response.json();
+        
         if (response.ok) {
-            loadDownloads();
+            showNotification(result.message || 'Download pausado', 'info');
+            setTimeout(() => loadDownloads(), 500);
         } else {
-            alert('Erro ao pausar download');
+            showNotification(result.error || 'Erro ao pausar download', 'error');
         }
     } catch (error) {
         console.error('Erro ao pausar download:', error);
-        alert('Erro ao pausar download');
+        showNotification('Erro de conexão ao pausar download', 'error');
+    } finally {
+        if (pauseBtn) {
+            pauseBtn.innerHTML = '<i class="fas fa-pause"></i>';
+            pauseBtn.disabled = false;
+        }
     }
 }
 
 async function resumeDownload(downloadId) {
+    const downloadElement = document.getElementById(`download-${downloadId}`);
+    const resumeBtn = downloadElement?.querySelector('.btn-resume');
+    
+    if (resumeBtn) {
+        resumeBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+        resumeBtn.disabled = true;
+    }
+    
     try {
         const response = await fetch(`/api/downloads/${downloadId}/resume`, {
             method: 'POST'
         });
         
+        const result = await response.json();
+        
         if (response.ok) {
-            loadDownloads();
+            showNotification(result.message || 'Download resumido', 'success');
+            setTimeout(() => loadDownloads(), 500);
         } else {
-            alert('Erro ao resumir download');
+            showNotification(result.error || 'Erro ao resumir download', 'error');
         }
     } catch (error) {
         console.error('Erro ao resumir download:', error);
-        alert('Erro ao resumir download');
+        showNotification('Erro de conexão ao resumir download', 'error');
+    } finally {
+        if (resumeBtn) {
+            resumeBtn.innerHTML = '<i class="fas fa-play"></i>';
+            resumeBtn.disabled = false;
+        }
     }
 }
 
 async function cancelDownload(downloadId) {
     if (!confirm('Tem certeza que deseja cancelar este download?')) return;
     
+    const downloadElement = document.getElementById(`download-${downloadId}`);
+    const cancelBtn = downloadElement?.querySelector('.btn-cancel');
+    
+    if (cancelBtn) {
+        cancelBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+        cancelBtn.disabled = true;
+    }
+    
     try {
         const response = await fetch(`/api/downloads/${downloadId}`, {
             method: 'DELETE'
         });
         
+        const result = await response.json();
+        
         if (response.ok) {
-            loadDownloads();
+            showNotification(result.message || 'Download cancelado', 'info');
+            setTimeout(() => loadDownloads(), 500);
         } else {
-            alert('Erro ao cancelar download');
+            showNotification(result.error || 'Erro ao cancelar download', 'error');
         }
     } catch (error) {
         console.error('Erro ao cancelar download:', error);
-        alert('Erro ao cancelar download');
+        showNotification('Erro de conexão ao cancelar download', 'error');
+    } finally {
+        if (cancelBtn) {
+            cancelBtn.innerHTML = '<i class="fas fa-times"></i>';
+            cancelBtn.disabled = false;
+        }
     }
 }
 
 function updateDownloadProgress(data) {
     const downloadElement = document.getElementById(`download-${data.downloadId}`);
-    if (!downloadElement) return;
+    if (!downloadElement) {
+        // Se o elemento não existe, recarregar a lista
+        setTimeout(() => loadDownloads(), 1000);
+        return;
+    }
     
     const progressFill = downloadElement.querySelector('.download-progress-fill');
     const statsElements = downloadElement.querySelectorAll('.download-stats span');
@@ -1337,15 +1466,34 @@ function updateDownloadProgress(data) {
     }
     
     if (statsElements.length >= 3) {
-        statsElements[0].textContent = `${formatFileSize(data.downloadedSize)} / ${formatFileSize(data.totalSize)}`;
-        statsElements[1].textContent = `${data.progress.toFixed(1)}%`;
+        // Atualizar estatísticas
+        statsElements[0].innerHTML = `<strong>${formatFileSize(data.downloadedSize)}</strong> / ${formatFileSize(data.totalSize)}`;
+        statsElements[1].innerHTML = `<strong>${data.progress.toFixed(1)}%</strong>`;
         statsElements[2].textContent = formatSpeed(data.speed);
+        
+        // Adicionar ETA se houver velocidade
+        if (statsElements.length >= 4 && data.speed > 0) {
+            const remainingBytes = data.totalSize - data.downloadedSize;
+            const etaSeconds = remainingBytes / data.speed;
+            statsElements[3].textContent = `ETA: ${formatTime(etaSeconds)}`;
+        }
+    }
+    
+    // Atualizar badge de status se necessário
+    const statusBadge = downloadElement.querySelector('.status-badge');
+    if (statusBadge && !statusBadge.classList.contains('status-downloading')) {
+        statusBadge.className = 'status-badge status-downloading';
+        statusBadge.textContent = 'BAIXANDO';
     }
 }
 
 function updateDownloadStatus(downloadId, status, error = null) {
     const downloadElement = document.getElementById(`download-${downloadId}`);
-    if (!downloadElement) return;
+    if (!downloadElement) {
+        // Recarregar lista se elemento não existe
+        setTimeout(() => loadDownloads(), 500);
+        return;
+    }
     
     const statusBadge = downloadElement.querySelector('.status-badge');
     if (statusBadge) {
@@ -1353,15 +1501,44 @@ function updateDownloadStatus(downloadId, status, error = null) {
         statusBadge.textContent = getStatusText(status);
     }
     
+    // Remover mensagens de erro antigas
+    const oldError = downloadElement.querySelector('.error-message');
+    if (oldError) {
+        oldError.remove();
+    }
+    
     if (error) {
         const errorDiv = document.createElement('div');
-        errorDiv.style.cssText = 'color: #e53e3e; font-size: 0.9rem; margin-top: 10px;';
-        errorDiv.innerHTML = `<i class="fas fa-exclamation-triangle"></i> ${error}`;
+        errorDiv.className = 'error-message';
+        errorDiv.style.cssText = `
+            color: var(--danger); 
+            font-size: 0.9rem; 
+            margin-top: 1rem; 
+            padding: 0.75rem; 
+            background: rgba(239, 68, 68, 0.1); 
+            border-radius: 8px; 
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        `;
+        errorDiv.innerHTML = `<i class="fas fa-exclamation-triangle"></i> <strong>Erro:</strong> ${error}`;
         downloadElement.appendChild(errorDiv);
     }
     
     // Atualizar controles
-    setTimeout(() => loadDownloads(), 1000);
+    setTimeout(() => {
+        const download = downloads.find(d => d.id == downloadId);
+        if (download) {
+            download.status = status;
+            if (error) download.error_message = error;
+            
+            const controlsContainer = downloadElement.querySelector('.download-controls');
+            const statusBadge = controlsContainer.querySelector('.status-badge');
+            const newControls = getDownloadControls(download);
+            
+            // Manter o badge e atualizar apenas os botões
+            const buttonsHtml = newControls.replace(/<span class="status-badge[^>]*>[^<]*<\/span>/, '');
+            controlsContainer.innerHTML = statusBadge.outerHTML + buttonsHtml;
+        }
+    }, 100);
 }
 
 function formatSpeed(bytesPerSecond) {
@@ -1370,6 +1547,71 @@ function formatSpeed(bytesPerSecond) {
     const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
     const i = Math.floor(Math.log(bytesPerSecond) / Math.log(k));
     return parseFloat((bytesPerSecond / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// Sistema de notificações
+function showNotification(message, type = 'info') {
+    // Remover notificações antigas
+    const existingNotifications = document.querySelectorAll('.notification');
+    existingNotifications.forEach(n => n.remove());
+    
+    const notification = document.createElement('div');
+    notification.className = `notification notification-${type}`;
+    notification.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        background: var(--card-bg);
+        color: var(--text-primary);
+        padding: 16px 20px;
+        border-radius: 12px;
+        border-left: 4px solid ${
+            type === 'success' ? 'var(--success)' :
+            type === 'error' ? 'var(--danger)' :
+            type === 'warning' ? 'var(--warning)' :
+            'var(--accent-secondary)'
+        };
+        box-shadow: var(--shadow-lg);
+        z-index: 10000;
+        max-width: 400px;
+        opacity: 0;
+        transform: translateX(100px);
+        transition: all 0.3s ease;
+        backdrop-filter: var(--blur);
+        border: 1px solid var(--border-color);
+    `;
+    
+    notification.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <i class="fas ${
+                type === 'success' ? 'fa-check-circle' :
+                type === 'error' ? 'fa-exclamation-circle' :
+                type === 'warning' ? 'fa-exclamation-triangle' :
+                'fa-info-circle'
+            }" style="color: ${
+                type === 'success' ? 'var(--success)' :
+                type === 'error' ? 'var(--danger)' :
+                type === 'warning' ? 'var(--warning)' :
+                'var(--accent-secondary)'
+            }"></i>
+            <span>${message}</span>
+        </div>
+    `;
+    
+    document.body.appendChild(notification);
+    
+    // Animar entrada
+    setTimeout(() => {
+        notification.style.opacity = '1';
+        notification.style.transform = 'translateX(0)';
+    }, 100);
+    
+    // Remover automaticamente
+    setTimeout(() => {
+        notification.style.opacity = '0';
+        notification.style.transform = 'translateX(100px)';
+        setTimeout(() => notification.remove(), 300);
+    }, type === 'error' ? 5000 : 3000);
 }
 
 // === UTILIDADES ===

@@ -455,22 +455,54 @@ app.post('/api/downloads', requireAuth, (req, res) => {
     return res.status(400).json({ error: 'URL é obrigatória' });
   }
   
+  // Validar URL
   try {
-    // Extrair nome do arquivo da URL
-    let filename = path.basename(new URL(url).pathname);
-    if (!filename || filename === '/') {
-      filename = 'download_' + Date.now();
-    }
-    
-    const db = new Database(DB_PATH);
-    const insert = db.prepare(`INSERT INTO downloads (user_id, url, filename, original_filename, status) VALUES (?, ?, ?, ?, 'pending')`);
-    const result = insert.run(req.session.user.id, url, filename, filename);
-    db.close();
-    
-    // Iniciar download
-    startDownload(result.lastInsertRowid, url);
-    
-    res.json({ success: true, downloadId: result.lastInsertRowid });
+    new URL(url);
+  } catch (error) {
+    return res.status(400).json({ error: 'URL inválida' });
+  }
+  
+  try {
+    getFileInfo(url)
+      .then(fileInfo => {
+        const db = new Database(DB_PATH);
+        const insert = db.prepare(`INSERT INTO downloads (user_id, url, filename, original_filename, file_size, status) VALUES (?, ?, ?, ?, ?, 'pending')`);
+        const result = insert.run(req.session.user.id, fileInfo.finalUrl, fileInfo.filename, fileInfo.filename, fileInfo.fileSize);
+        db.close();
+        
+        startDownload(result.lastInsertRowid, fileInfo.finalUrl);
+        
+        res.json({ 
+          success: true, 
+          downloadId: result.lastInsertRowid,
+          filename: fileInfo.filename,
+          fileSize: fileInfo.fileSize
+        });
+      })
+      .catch(error => {
+        console.error('Erro ao analisar URL:', error);
+        
+        // Fallback: criar download mesmo sem informações completas
+        let filename = path.basename(new URL(url).pathname);
+        if (!filename || filename === '/') {
+          filename = 'download_' + Date.now() + '.bin';
+        }
+        
+        const db = new Database(DB_PATH);
+        const insert = db.prepare(`INSERT INTO downloads (user_id, url, filename, original_filename, status) VALUES (?, ?, ?, ?, 'pending')`);
+        const result = insert.run(req.session.user.id, url, filename, filename);
+        db.close();
+        
+        startDownload(result.lastInsertRowid, url);
+        
+        res.json({ 
+          success: true, 
+          downloadId: result.lastInsertRowid,
+          filename: filename,
+          warning: 'Não foi possível obter informações completas do arquivo.'
+        });
+      });
+      
   } catch (error) {
     console.error('Erro ao criar download:', error);
     res.status(500).json({ error: 'Erro ao criar download' });
@@ -621,9 +653,111 @@ io.on('connection', (socket) => {
 // === GERENCIAMENTO DE DOWNLOADS ===
 const activeDownloads = new Map();
 
+// Função para obter informações do arquivo via HTTP HEAD
+function getFileInfo(url, maxRedirects = 5) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(url);
+    const isHttps = parsedUrl.protocol === 'https:';
+    const httpModule = isHttps ? https : require('http');
+    
+    let redirectCount = 0;
+    
+    function makeRequest(currentUrl) {
+      const urlObj = new URL(currentUrl);
+      const options = {
+        hostname: urlObj.hostname,
+        port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+        path: urlObj.pathname + urlObj.search,
+        method: 'HEAD',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          'Accept': '*/*'
+        },
+        timeout: 10000
+      };
+      
+      const req = (urlObj.protocol === 'https:' ? https : require('http')).request(options, (res) => {
+        // Seguir redirecionamentos
+        if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+          if (redirectCount >= maxRedirects) {
+            reject(new Error('Muitos redirecionamentos'));
+            return;
+          }
+          redirectCount++;
+          const redirectUrl = new URL(res.headers.location, currentUrl).href;
+          console.log(`Redirecionando para: ${redirectUrl}`);
+          makeRequest(redirectUrl);
+          return;
+        }
+        
+        if (res.statusCode !== 200) {
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
+        }
+        
+        let filename = 'download_' + Date.now();
+        
+        // Tentar obter nome do Content-Disposition
+        if (res.headers['content-disposition']) {
+          const match = res.headers['content-disposition'].match(/filename[^;=\n]*=['"]?([^'";\n]*)['"]?/);
+          if (match && match[1]) {
+            filename = match[1].trim();
+          }
+        }
+        
+        // Se não encontrou, tentar extrair da URL final
+        if (filename.startsWith('download_')) {
+          const urlFilename = path.basename(urlObj.pathname);
+          if (urlFilename && urlFilename !== '/' && urlFilename.includes('.')) {
+            filename = urlFilename;
+          }
+        }
+        
+        // Se ainda não tem extensão, tentar deduzir do Content-Type
+        if (!filename.includes('.') && res.headers['content-type']) {
+          const contentType = res.headers['content-type'].split(';')[0];
+          const extensions = {
+            'application/pdf': '.pdf',
+            'application/zip': '.zip',
+            'application/x-zip-compressed': '.zip',
+            'image/jpeg': '.jpg',
+            'image/png': '.png',
+            'image/gif': '.gif',
+            'video/mp4': '.mp4',
+            'audio/mpeg': '.mp3',
+            'text/plain': '.txt',
+            'application/json': '.json'
+          };
+          
+          if (extensions[contentType]) {
+            filename += extensions[contentType];
+          }
+        }
+        
+        resolve({
+          finalUrl: currentUrl,
+          filename: filename,
+          fileSize: parseInt(res.headers['content-length'] || '0'),
+          contentType: res.headers['content-type'] || 'application/octet-stream',
+          acceptRanges: res.headers['accept-ranges'] === 'bytes'
+        });
+      });
+      
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('Timeout na requisição'));
+      });
+      req.end();
+    }
+    
+    makeRequest(url);
+  });
+}
+
 function startDownload(downloadId, downloadUrl) {
   if (activeDownloads.has(downloadId)) {
-    return; // Download já está ativo
+    return;
   }
   
   const downloadInfo = {
@@ -631,12 +765,27 @@ function startDownload(downloadId, downloadUrl) {
     url: downloadUrl,
     startTime: Date.now(),
     paused: false,
-    cancelled: false
+    cancelled: false,
+    request: null
   };
   
   activeDownloads.set(downloadId, downloadInfo);
   
-  performDownload(downloadId, downloadUrl, 0);
+  getFileInfo(downloadUrl)
+    .then(fileInfo => {
+      console.log('Informações do arquivo:', fileInfo);
+      
+      const db = new Database(DB_PATH);
+      const update = db.prepare('UPDATE downloads SET filename = ?, original_filename = ?, file_size = ? WHERE id = ?');
+      update.run(fileInfo.filename, fileInfo.filename, fileInfo.fileSize, downloadId);
+      db.close();
+      
+      performDownload(downloadId, fileInfo.finalUrl, 0, fileInfo);
+    })
+    .catch(error => {
+      console.error('Erro ao obter informações do arquivo:', error);
+      handleDownloadError(downloadId, `Erro ao analisar URL: ${error.message}`);
+    });
 }
 
 function performDownload(downloadId, downloadUrl, resumeFrom = 0) {
@@ -777,25 +926,82 @@ function performDownload(downloadId, downloadUrl, resumeFrom = 0) {
 
 function pauseDownload(downloadId) {
   const downloadInfo = activeDownloads.get(downloadId);
-  if (downloadInfo) {
+  if (downloadInfo && !downloadInfo.paused && !downloadInfo.cancelled) {
+    console.log(`Pausando download ${downloadId}`);
     downloadInfo.paused = true;
+    
+    if (downloadInfo.response) {
+      downloadInfo.response.pause();
+    }
+    
+    if (downloadInfo.fileStream) {
+      downloadInfo.fileStream.end();
+    }
+    
+    if (downloadInfo.request) {
+      downloadInfo.request.destroy();
+    }
+    
+    const db = new Database(DB_PATH);
+    const updateStatus = db.prepare('UPDATE downloads SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
+    updateStatus.run('paused', downloadId);
+    db.close();
+    
+    io.emit('download_paused', { downloadId });
   }
 }
 
 function resumeDownload(downloadId, downloadUrl, resumeFrom) {
   const downloadInfo = activeDownloads.get(downloadId);
-  if (downloadInfo) {
+  if (downloadInfo && downloadInfo.paused && !downloadInfo.cancelled) {
+    console.log(`Resumindo download ${downloadId} do byte ${resumeFrom}`);
     downloadInfo.paused = false;
+    downloadInfo.request = null;
+    downloadInfo.response = null;
+    downloadInfo.fileStream = null;
+    
     performDownload(downloadId, downloadUrl, resumeFrom);
   } else {
-    startDownload(downloadId, downloadUrl);
+    console.log(`Recriando download ${downloadId}`);
+    const db = new Database(DB_PATH);
+    const download = db.prepare('SELECT * FROM downloads WHERE id = ?').get(downloadId);
+    db.close();
+    
+    if (download) {
+      const downloadInfo = {
+        id: downloadId,
+        url: downloadUrl,
+        startTime: Date.now(),
+        paused: false,
+        cancelled: false,
+        request: null
+      };
+      
+      activeDownloads.set(downloadId, downloadInfo);
+      performDownload(downloadId, downloadUrl, resumeFrom);
+    }
   }
 }
 
 function cancelDownload(downloadId) {
   const downloadInfo = activeDownloads.get(downloadId);
   if (downloadInfo) {
+    console.log(`Cancelando download ${downloadId}`);
     downloadInfo.cancelled = true;
+    downloadInfo.paused = false;
+    
+    if (downloadInfo.response) {
+      downloadInfo.response.destroy();
+    }
+    
+    if (downloadInfo.fileStream) {
+      downloadInfo.fileStream.destroy();
+    }
+    
+    if (downloadInfo.request) {
+      downloadInfo.request.destroy();
+    }
+    
     activeDownloads.delete(downloadId);
   }
 }
