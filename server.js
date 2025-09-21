@@ -1,7 +1,7 @@
 const express = require('express');
 const session = require('express-session');
 const fileUpload = require('express-fileupload');
-const sqlite3 = require('sqlite3').verbose();
+const Database = require('better-sqlite3');
 const bcrypt = require('bcryptjs');
 const path = require('path');
 const fs = require('fs');
@@ -55,11 +55,12 @@ function initDatabase() {
     fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
   }
   
-  const db = new sqlite3.Database(DB_PATH);
+  const db = new Database(DB_PATH);
   
-  db.serialize(() => {
+  // Criar tabelas
+  try {
     // Tabela de usuários
-    db.run(`CREATE TABLE IF NOT EXISTS users (
+    db.exec(`CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
       password TEXT NOT NULL,
@@ -68,7 +69,7 @@ function initDatabase() {
     )`);
     
     // Tabela de arquivos
-    db.run(`CREATE TABLE IF NOT EXISTS files (
+    db.exec(`CREATE TABLE IF NOT EXISTS files (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER,
       filename TEXT NOT NULL,
@@ -82,7 +83,7 @@ function initDatabase() {
     )`);
     
     // Tabela de contatos
-    db.run(`CREATE TABLE IF NOT EXISTS contacts (
+    db.exec(`CREATE TABLE IF NOT EXISTS contacts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER,
       name TEXT NOT NULL,
@@ -94,7 +95,7 @@ function initDatabase() {
     )`);
     
     // Tabela de eventos do calendário
-    db.run(`CREATE TABLE IF NOT EXISTS calendar_events (
+    db.exec(`CREATE TABLE IF NOT EXISTS calendar_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER,
       title TEXT NOT NULL,
@@ -107,7 +108,7 @@ function initDatabase() {
     )`);
     
     // Tabela de notas
-    db.run(`CREATE TABLE IF NOT EXISTS notes (
+    db.exec(`CREATE TABLE IF NOT EXISTS notes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER,
       title TEXT NOT NULL,
@@ -119,7 +120,7 @@ function initDatabase() {
     )`);
     
     // Tabela de mensagens do chat
-    db.run(`CREATE TABLE IF NOT EXISTS chat_messages (
+    db.exec(`CREATE TABLE IF NOT EXISTS chat_messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER,
       username TEXT NOT NULL,
@@ -130,11 +131,14 @@ function initDatabase() {
     
     // Criar usuário admin padrão
     const adminPassword = bcrypt.hashSync('admin123', 10);
-    db.run(`INSERT OR IGNORE INTO users (username, password, email) VALUES (?, ?, ?)`, 
-           ['admin', adminPassword, 'admin@cloud-termux.local']);
-  });
-  
-  db.close();
+    const insertAdmin = db.prepare(`INSERT OR IGNORE INTO users (username, password, email) VALUES (?, ?, ?)`);
+    insertAdmin.run('admin', adminPassword, 'admin@cloud-termux.local');
+    
+  } catch (error) {
+    console.error('Erro ao inicializar banco de dados:', error);
+  } finally {
+    db.close();
+  }
 }
 
 // Middleware de autenticação
@@ -162,13 +166,10 @@ app.get('/login', (req, res) => {
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
   
-  const db = new sqlite3.Database(DB_PATH);
-  db.get('SELECT * FROM users WHERE username = ?', [username], (err, user) => {
+  try {
+    const db = new Database(DB_PATH);
+    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
     db.close();
-    
-    if (err) {
-      return res.status(500).json({ error: 'Erro no banco de dados' });
-    }
     
     if (user && bcrypt.compareSync(password, user.password)) {
       req.session.user = {
@@ -180,7 +181,10 @@ app.post('/login', (req, res) => {
     } else {
       res.status(401).json({ error: 'Credenciais inválidas' });
     }
-  });
+  } catch (error) {
+    console.error('Erro no login:', error);
+    res.status(500).json({ error: 'Erro no banco de dados' });
+  }
 });
 
 app.post('/logout', (req, res) => {
@@ -213,39 +217,40 @@ app.post('/api/upload', requireAuth, (req, res) => {
       return res.status(500).json({ error: 'Erro ao salvar arquivo' });
     }
     
-    const db = new sqlite3.Database(DB_PATH);
-    db.run(`INSERT INTO files (user_id, filename, original_name, size, mimetype, path) 
-            VALUES (?, ?, ?, ?, ?, ?)`,
-           [req.session.user.id, fileName, file.name, file.size, file.mimetype, uploadPath],
-           function(err) {
-             db.close();
-             if (err) {
-               return res.status(500).json({ error: 'Erro ao salvar informações do arquivo' });
-             }
-             res.json({ success: true, fileId: this.lastID, fileName: file.name });
-           });
+    try {
+      const db = new Database(DB_PATH);
+      const insert = db.prepare(`INSERT INTO files (user_id, filename, original_name, size, mimetype, path) VALUES (?, ?, ?, ?, ?, ?)`);
+      const result = insert.run(req.session.user.id, fileName, file.name, file.size, file.mimetype, uploadPath);
+      db.close();
+      
+      res.json({ success: true, fileId: result.lastInsertRowid, fileName: file.name });
+    } catch (error) {
+      console.error('Erro ao salvar arquivo:', error);
+      res.status(500).json({ error: 'Erro ao salvar informações do arquivo' });
+    }
   });
 });
 
 app.get('/api/files', requireAuth, (req, res) => {
-  const db = new sqlite3.Database(DB_PATH);
-  db.all('SELECT * FROM files WHERE user_id = ? ORDER BY created_at DESC', 
-         [req.session.user.id], (err, files) => {
+  try {
+    const db = new Database(DB_PATH);
+    const files = db.prepare('SELECT * FROM files WHERE user_id = ? ORDER BY created_at DESC').all(req.session.user.id);
     db.close();
-    if (err) {
-      return res.status(500).json({ error: 'Erro ao buscar arquivos' });
-    }
     res.json(files);
-  });
+  } catch (error) {
+    console.error('Erro ao buscar arquivos:', error);
+    res.status(500).json({ error: 'Erro ao buscar arquivos' });
+  }
 });
 
 app.delete('/api/files/:id', requireAuth, (req, res) => {
   const fileId = req.params.id;
-  const db = new sqlite3.Database(DB_PATH);
   
-  db.get('SELECT * FROM files WHERE id = ? AND user_id = ?', 
-         [fileId, req.session.user.id], (err, file) => {
-    if (err || !file) {
+  try {
+    const db = new Database(DB_PATH);
+    const file = db.prepare('SELECT * FROM files WHERE id = ? AND user_id = ?').get(fileId, req.session.user.id);
+    
+    if (!file) {
       db.close();
       return res.status(404).json({ error: 'Arquivo não encontrado' });
     }
@@ -256,121 +261,129 @@ app.delete('/api/files/:id', requireAuth, (req, res) => {
     });
     
     // Deletar registro do banco
-    db.run('DELETE FROM files WHERE id = ?', [fileId], (deleteErr) => {
-      db.close();
-      if (deleteErr) {
-        return res.status(500).json({ error: 'Erro ao deletar arquivo' });
-      }
-      res.json({ success: true });
-    });
-  });
+    const deleteStmt = db.prepare('DELETE FROM files WHERE id = ?');
+    deleteStmt.run(fileId);
+    db.close();
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Erro ao deletar arquivo:', error);
+    res.status(500).json({ error: 'Erro ao deletar arquivo' });
+  }
 });
 
 // ROTAS DE CONTATOS
 app.get('/api/contacts', requireAuth, (req, res) => {
-  const db = new sqlite3.Database(DB_PATH);
-  db.all('SELECT * FROM contacts WHERE user_id = ? ORDER BY name', 
-         [req.session.user.id], (err, contacts) => {
+  try {
+    const db = new Database(DB_PATH);
+    const contacts = db.prepare('SELECT * FROM contacts WHERE user_id = ? ORDER BY name').all(req.session.user.id);
     db.close();
-    if (err) {
-      return res.status(500).json({ error: 'Erro ao buscar contatos' });
-    }
     res.json(contacts);
-  });
+  } catch (error) {
+    console.error('Erro ao buscar contatos:', error);
+    res.status(500).json({ error: 'Erro ao buscar contatos' });
+  }
 });
 
 app.post('/api/contacts', requireAuth, (req, res) => {
   const { name, email, phone, notes } = req.body;
-  const db = new sqlite3.Database(DB_PATH);
   
-  db.run('INSERT INTO contacts (user_id, name, email, phone, notes) VALUES (?, ?, ?, ?, ?)',
-         [req.session.user.id, name, email, phone, notes], function(err) {
+  try {
+    const db = new Database(DB_PATH);
+    const insert = db.prepare('INSERT INTO contacts (user_id, name, email, phone, notes) VALUES (?, ?, ?, ?, ?)');
+    const result = insert.run(req.session.user.id, name, email, phone, notes);
     db.close();
-    if (err) {
-      return res.status(500).json({ error: 'Erro ao criar contato' });
-    }
-    res.json({ success: true, id: this.lastID });
-  });
+    
+    res.json({ success: true, id: result.lastInsertRowid });
+  } catch (error) {
+    console.error('Erro ao criar contato:', error);
+    res.status(500).json({ error: 'Erro ao criar contato' });
+  }
 });
 
 app.delete('/api/contacts/:id', requireAuth, (req, res) => {
-  const db = new sqlite3.Database(DB_PATH);
-  db.run('DELETE FROM contacts WHERE id = ? AND user_id = ?', 
-         [req.params.id, req.session.user.id], (err) => {
+  try {
+    const db = new Database(DB_PATH);
+    const deleteStmt = db.prepare('DELETE FROM contacts WHERE id = ? AND user_id = ?');
+    deleteStmt.run(req.params.id, req.session.user.id);
     db.close();
-    if (err) {
-      return res.status(500).json({ error: 'Erro ao deletar contato' });
-    }
+    
     res.json({ success: true });
-  });
+  } catch (error) {
+    console.error('Erro ao deletar contato:', error);
+    res.status(500).json({ error: 'Erro ao deletar contato' });
+  }
 });
 
 // ROTAS DO CALENDÁRIO
 app.get('/api/calendar/events', requireAuth, (req, res) => {
-  const db = new sqlite3.Database(DB_PATH);
-  db.all('SELECT * FROM calendar_events WHERE user_id = ? ORDER BY start_date', 
-         [req.session.user.id], (err, events) => {
+  try {
+    const db = new Database(DB_PATH);
+    const events = db.prepare('SELECT * FROM calendar_events WHERE user_id = ? ORDER BY start_date').all(req.session.user.id);
     db.close();
-    if (err) {
-      return res.status(500).json({ error: 'Erro ao buscar eventos' });
-    }
     res.json(events);
-  });
+  } catch (error) {
+    console.error('Erro ao buscar eventos:', error);
+    res.status(500).json({ error: 'Erro ao buscar eventos' });
+  }
 });
 
 app.post('/api/calendar/events', requireAuth, (req, res) => {
   const { title, description, start_date, end_date, all_day } = req.body;
-  const db = new sqlite3.Database(DB_PATH);
   
-  db.run(`INSERT INTO calendar_events (user_id, title, description, start_date, end_date, all_day) 
-          VALUES (?, ?, ?, ?, ?, ?)`,
-         [req.session.user.id, title, description, start_date, end_date, all_day ? 1 : 0], 
-         function(err) {
+  try {
+    const db = new Database(DB_PATH);
+    const insert = db.prepare(`INSERT INTO calendar_events (user_id, title, description, start_date, end_date, all_day) VALUES (?, ?, ?, ?, ?, ?)`);
+    const result = insert.run(req.session.user.id, title, description, start_date, end_date, all_day ? 1 : 0);
     db.close();
-    if (err) {
-      return res.status(500).json({ error: 'Erro ao criar evento' });
-    }
-    res.json({ success: true, id: this.lastID });
-  });
+    
+    res.json({ success: true, id: result.lastInsertRowid });
+  } catch (error) {
+    console.error('Erro ao criar evento:', error);
+    res.status(500).json({ error: 'Erro ao criar evento' });
+  }
 });
 
 // ROTAS DE NOTAS
 app.get('/api/notes', requireAuth, (req, res) => {
-  const db = new sqlite3.Database(DB_PATH);
-  db.all('SELECT * FROM notes WHERE user_id = ? ORDER BY updated_at DESC', 
-         [req.session.user.id], (err, notes) => {
+  try {
+    const db = new Database(DB_PATH);
+    const notes = db.prepare('SELECT * FROM notes WHERE user_id = ? ORDER BY updated_at DESC').all(req.session.user.id);
     db.close();
-    if (err) {
-      return res.status(500).json({ error: 'Erro ao buscar notas' });
-    }
     res.json(notes);
-  });
+  } catch (error) {
+    console.error('Erro ao buscar notas:', error);
+    res.status(500).json({ error: 'Erro ao buscar notas' });
+  }
 });
 
 app.post('/api/notes', requireAuth, (req, res) => {
   const { title, content, tags } = req.body;
-  const db = new sqlite3.Database(DB_PATH);
   
-  db.run('INSERT INTO notes (user_id, title, content, tags) VALUES (?, ?, ?, ?)',
-         [req.session.user.id, title, content, tags], function(err) {
+  try {
+    const db = new Database(DB_PATH);
+    const insert = db.prepare('INSERT INTO notes (user_id, title, content, tags) VALUES (?, ?, ?, ?)');
+    const result = insert.run(req.session.user.id, title, content, tags);
     db.close();
-    if (err) {
-      return res.status(500).json({ error: 'Erro ao criar nota' });
-    }
-    res.json({ success: true, id: this.lastID });
-  });
+    
+    res.json({ success: true, id: result.lastInsertRowid });
+  } catch (error) {
+    console.error('Erro ao criar nota:', error);
+    res.status(500).json({ error: 'Erro ao criar nota' });
+  }
 });
 
 // CHAT COM SOCKET.IO
 app.get('/api/chat/messages', requireAuth, (req, res) => {
-  const db = new sqlite3.Database(DB_PATH);
-  db.all('SELECT * FROM chat_messages ORDER BY created_at ASC LIMIT 50', (err, messages) => {
+  try {
+    const db = new Database(DB_PATH);
+    const messages = db.prepare('SELECT * FROM chat_messages ORDER BY created_at ASC LIMIT 50').all();
     db.close();
-    if (err) {
-      return res.status(500).json({ error: 'Erro ao buscar mensagens' });
-    }
     res.json(messages);
-  });
+  } catch (error) {
+    console.error('Erro ao buscar mensagens:', error);
+    res.status(500).json({ error: 'Erro ao buscar mensagens' });
+  }
 });
 
 io.on('connection', (socket) => {
@@ -383,18 +396,20 @@ io.on('connection', (socket) => {
   
   socket.on('chat message', (data) => {
     if (socket.userData) {
-      const db = new sqlite3.Database(DB_PATH);
-      db.run('INSERT INTO chat_messages (user_id, username, message) VALUES (?, ?, ?)',
-             [socket.userData.id, socket.userData.username, data.message], (err) => {
+      try {
+        const db = new Database(DB_PATH);
+        const insert = db.prepare('INSERT INTO chat_messages (user_id, username, message) VALUES (?, ?, ?)');
+        insert.run(socket.userData.id, socket.userData.username, data.message);
         db.close();
-        if (!err) {
-          io.to('chat').emit('chat message', {
-            username: socket.userData.username,
-            message: data.message,
-            created_at: new Date().toISOString()
-          });
-        }
-      });
+        
+        io.to('chat').emit('chat message', {
+          username: socket.userData.username,
+          message: data.message,
+          created_at: new Date().toISOString()
+        });
+      } catch (error) {
+        console.error('Erro ao salvar mensagem:', error);
+      }
     }
   });
   

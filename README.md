@@ -78,6 +78,12 @@ chmod +x install-termux.sh
 ./install-termux.sh
 ```
 
+**🚪PROBLEMAS NA INSTALAÇÃO?** Use o script de correção:
+```bash
+chmod +x fix-cloud-termux.sh
+./fix-cloud-termux.sh
+```
+
 ### 🛠️ Instalação Manual
 
 ```bash
@@ -199,6 +205,8 @@ VALUES ('novouser', 'senha_hash_bcrypt', 'email@exemplo.com');
 - ✅ Validação de uploads
 - ✅ Limitação de tamanho de arquivos
 - ✅ Headers de segurança com Helmet
+- ✅ Better-SQLite3 (mais seguro que sqlite3 legacy)
+- ✅ Dependências atualizadas (sem vulnerabilidades conhecidas)
 
 ### Recomendações Adicionais:
 - 🔒 Altere a senha padrão do admin
@@ -208,25 +216,78 @@ VALUES ('novouser', 'senha_hash_bcrypt', 'email@exemplo.com');
 
 ## 🐛 Solução de Problemas
 
-### ❌ "Erro ao conectar com servidor"
+### ❌ **"ModuleNotFoundError: No module named 'distutils'"**
+⚠️ **PROBLEMA COMUM NO PYTHON 3.12**
+
+**Solução:**
+```bash
+# Método 1: Script automático
+./fix-cloud-termux.sh
+
+# Método 2: Manual
+pkg install python-pip
+pip install setuptools wheel distutils-extra
+```
+
+### ❌ **"SQLite3 compilation failed"**
+⚠️ **RESOLVIDO:** Agora usamos `better-sqlite3` que não requer compilação
+
+**Se ainda der problema:**
+```bash
+rm -rf node_modules/sqlite3
+npm install better-sqlite3 --save
+```
+
+### ❌ **"npm not found"**
+```bash
+# No Termux
+pkg install nodejs
+# O npm geralmente vem junto
+
+# Se não funcionar
+ln -sf $PREFIX/lib/node_modules/npm/bin/npm-cli.js $PREFIX/bin/npm
+```
+
+### ❌ **"Erro ao conectar com servidor"**
 - Verifique se o servidor está rodando: `ps aux | grep node`
 - Tente reiniciar: `./start-cloud.sh`
 - Verifique logs: `tail -f cloud-termux.log`
 
-### ❌ "Porta já em uso"
+### ❌ **"Porta já em uso"**
 - Altere a porta no `server.js` ou mate o processo:
 ```bash
 lsof -ti:8080 | xargs kill
 ```
 
-### ❌ "Falha ao instalar dependências"
-- Atualize o NPM: `npm install -g npm@latest`
-- Use modo compatibilidade: `npm install --legacy-peer-deps`
-- Limpe cache: `npm cache clean --force`
+### ❌ **"Falha ao instalar dependências"**
+**Solução escalonada:**
+```bash
+# 1. Tente o script de correção
+./fix-cloud-termux.sh
 
-### ❌ "Banco de dados corrompido"
+# 2. Limpe tudo e reinstale
+rm -rf node_modules package-lock.json
+npm cache clean --force
+npm install --no-optional
+
+# 3. Instalação individual
+npm install express better-sqlite3 bcryptjs socket.io
+```
+
+### ❌ **"Banco de dados corrompido"**
 - Exclua o arquivo: `rm database/cloud.db`
 - Reinicie o servidor para recriar automaticamente
+
+### 🚪 **INSTALAÇÃO LIMPA (Reset Completo)**
+```bash
+# Remover tudo e começar do zero
+cd Cloud-termux
+rm -rf node_modules package-lock.json database
+rm -f cloud-termux.log cloud-termux.pid
+
+# Reinstalar
+./fix-cloud-termux.sh
+```
 
 ## 🤝 Contribuição
 
@@ -243,12 +304,15 @@ Contribuições são bem-vindas! Para contribuir:
 - [ ] 🌙 Modo escuro
 - [ ] 📊 Dashboard com gráficos
 - [ ] 🔄 Sincronização com outros dispositivos
-- [ ] 📱 App móvel nativo
+- [ ] 📱 App móvel nativo (PWA)
 - [ ] 🎨 Temas customizáveis
 - [ ] 📧 Sistema de notificações
 - [ ] 🗂️ Pastas para organização de arquivos
 - [ ] 👥 Múltiplos usuários com permissões
 - [ ] 🔍 Busca global
+- [x] ✅ **Migração para better-sqlite3**
+- [x] ✅ **Correção de compatibilidade Python 3.12**
+- [x] ✅ **Script de correção automática**
 
 ## 📄 Licença
 
