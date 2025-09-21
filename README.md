@@ -13,12 +13,10 @@ O **Cloud-Termux** é uma solução completa de nuvem pessoal que permite você 
 
 ### 🌟 Por que usar?
 
-- **🔒 Privacidade Total**: Seus dados ficam no seu dispositivo
-- **📱 Mobile-First**: Otimizado para rodar no Termux (Android)
-- **🌐 Interface Moderna**: Design responsivo e intuitivo
-- **⚡ Leve e Rápido**: Baixo consumo de recursos
-- **🔧 Fácil Instalação**: Script automatizado de instalação
-- **💰 Gratuito**: 100% open-source e gratuito
+- **📱 Interface Mobile-First**: Design totalmente responsivo e otimizado para celulares
+- **⚡ Sistema Adaptativo**: Detecta automaticamente qual banco usar (SQLite → JSON)
+- **🔐 Zero Compilação**: Modo JSON que funciona em qualquer sistema
+- **🔧 Auto-Correção**: Scripts inteligentes que resolvem problemas automaticamente
 
 ## ✨ Funcionalidades
 
@@ -78,10 +76,15 @@ chmod +x install-termux.sh
 ./install-termux.sh
 ```
 
-**🚪PROBLEMAS NA INSTALAÇÃO?** Use o script de correção:
+**🚪PROBLEMAS DE INSTALAÇÃO?** 🚑 **USE NOSSO SISTEMA DE AUTO-CORREÇÃO:**
 ```bash
-chmod +x fix-cloud-termux.sh
+# Método 1: Script de correção automática
 ./fix-cloud-termux.sh
+
+# Método 2: Modo super-seguro (100% compatível)
+cp package-safe.json package.json
+npm install --no-optional --production
+node server-adaptive.js
 ```
 
 ### 🛠️ Instalação Manual

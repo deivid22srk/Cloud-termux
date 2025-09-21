@@ -18,6 +18,9 @@
             background: #f5f5f5;
             height: 100vh;
             overflow: hidden;
+            margin: 0;
+            padding: 0;
+            -webkit-text-size-adjust: 100%;
         }
 
         .dashboard {
@@ -28,6 +31,27 @@
                 "sidebar header"
                 "sidebar main";
             height: 100vh;
+        }
+        
+        .mobile-menu-btn {
+            display: none;
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            color: #333;
+            cursor: pointer;
+            padding: 10px;
+        }
+        
+        .sidebar-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 999;
         }
 
         .header {
@@ -40,6 +64,7 @@
             padding: 0 30px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             z-index: 100;
+            position: relative;
         }
 
         .header h1 {
@@ -85,6 +110,8 @@
             color: white;
             padding: 0;
             box-shadow: 2px 0 4px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease;
+            z-index: 1000;
         }
 
         .sidebar-header {
@@ -114,14 +141,21 @@
             gap: 12px;
             color: white;
             text-decoration: none;
-            padding: 12px 20px;
-            transition: background 0.3s ease;
+            padding: 15px 20px;
+            transition: all 0.3s ease;
             border-left: 3px solid transparent;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: rgba(255,255,255,0.1);
         }
 
         .nav-link:hover, .nav-link.active {
-            background: rgba(255,255,255,0.1);
+            background: rgba(255,255,255,0.15);
             border-left-color: #667eea;
+            transform: translateX(2px);
+        }
+        
+        .nav-link:active {
+            background: rgba(255,255,255,0.25);
         }
 
         .main-content {
@@ -205,7 +239,7 @@
             background: linear-gradient(135deg, #667eea, #764ba2);
             color: white;
             border: none;
-            padding: 12px 24px;
+            padding: 14px 24px;
             border-radius: 8px;
             cursor: pointer;
             font-size: 1rem;
@@ -213,6 +247,8 @@
             display: inline-flex;
             align-items: center;
             gap: 8px;
+            touch-action: manipulation;
+            min-height: 44px; /* Touch target size */
         }
 
         .btn:hover {
@@ -284,12 +320,17 @@
         .upload-area {
             border: 2px dashed #667eea;
             border-radius: 12px;
-            padding: 40px;
+            padding: 40px 20px;
             text-align: center;
             background: #f8f9ff;
             cursor: pointer;
             transition: all 0.3s ease;
             margin-bottom: 20px;
+            min-height: 120px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
         }
 
         .upload-area:hover {
@@ -484,42 +525,242 @@
         @media (max-width: 768px) {
             .dashboard {
                 grid-template-columns: 1fr;
-                grid-template-rows: 60px auto 1fr;
+                grid-template-rows: 60px 1fr;
                 grid-template-areas: 
                     "header"
-                    "sidebar"
                     "main";
+            }
+            
+            .mobile-menu-btn {
+                display: block;
             }
 
             .sidebar {
-                max-height: 200px;
-                overflow-y: auto;
+                position: fixed;
+                top: 0;
+                left: -250px;
+                height: 100vh;
+                width: 250px;
+                z-index: 1001;
+            }
+            
+            .sidebar.active {
+                transform: translateX(250px);
+            }
+            
+            .sidebar-overlay.active {
+                display: block;
             }
 
             .main-content {
                 padding: 20px 15px;
+                overflow-y: auto;
+            }
+            
+            .header {
+                padding: 0 15px;
+            }
+            
+            .header h1 {
+                font-size: 1.2rem;
+            }
+            
+            .user-info {
+                gap: 10px;
+            }
+            
+            .user-info span {
+                display: none; /* Esconder nome do usuário em mobile */
             }
 
             .stats-grid {
-                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+                gap: 15px;
+            }
+            
+            .stat-card {
+                padding: 20px 15px;
+            }
+            
+            .stat-number {
+                font-size: 1.8rem;
             }
 
             .modal-content {
                 width: 95%;
                 margin: 10% auto;
                 padding: 20px;
+                max-height: 80vh;
+                overflow-y: auto;
             }
 
             .notes-grid {
                 grid-template-columns: 1fr;
+                gap: 15px;
+            }
+            
+            .upload-area {
+                padding: 30px 15px;
+                margin: 15px 0;
+            }
+            
+            .upload-area h3 {
+                font-size: 1.2rem;
+                margin-bottom: 8px;
+            }
+            
+            .upload-area p {
+                font-size: 0.9rem;
+                margin-bottom: 0;
+            }
+            
+            .table {
+                font-size: 0.9rem;
+            }
+            
+            .table th,
+            .table td {
+                padding: 10px 8px;
+            }
+            
+            .form-group input,
+            .form-group textarea,
+            .form-group select {
+                padding: 14px 12px;
+                font-size: 16px; /* Evita zoom no iOS */
+            }
+            
+            .btn {
+                padding: 16px 20px;
+                font-size: 1rem;
+                min-height: 48px;
+            }
+            
+            .nav-link {
+                padding: 16px 20px;
+                font-size: 1rem;
+            }
+            
+            .chat-input {
+                padding: 12px;
+                font-size: 16px;
+            }
+            
+            .calendar-grid {
+                font-size: 0.9rem;
+            }
+            
+            .calendar-day {
+                min-height: 70px;
+                padding: 12px 8px;
+            }
+            
+            .card {
+                margin-bottom: 15px;
+                padding: 20px;
+            }
+            /* Touch improvements */
+            .btn, .nav-link, .logout-btn, .close {
+                -webkit-tap-highlight-color: rgba(0,0,0,0.1);
+            }
+            
+            /* Prevent zoom on form inputs in iOS */
+            input, textarea, select {
+                -webkit-appearance: none;
+                border-radius: 8px;
+            }
+            
+            /* Improve scrolling on mobile */
+            .main-content {
+                -webkit-overflow-scrolling: touch;
+            }
+            
+            .chat-messages {
+                -webkit-overflow-scrolling: touch;
+            }
+            
+            /* Better modal handling on mobile */
+            .modal {
+                padding: 10px;
+            }
+            
+            .modal-content {
+                border-radius: 12px;
+            }
+            
+            /* Improved table responsiveness */
+            .table {
+                display: block;
+                overflow-x: auto;
+                white-space: nowrap;
+            }
+            
+            /* Better upload area for mobile */
+            .upload-area i {
+                font-size: 2.5rem !important;
+                margin-bottom: 12px;
+            }
+            
+            /* New styles for enhanced features */
+            .btn-download {
+                background: linear-gradient(135deg, #38a169, #2f855a);
+                padding: 6px 12px;
+                font-size: 0.8rem;
+                margin-left: 5px;
+            }
+            
+            .btn-folder {
+                background: linear-gradient(135deg, #f6ad55, #ed8936);
+                padding: 6px 12px;
+                font-size: 0.8rem;
+                margin-left: 5px;
+            }
+            
+            .storage-info {
+                background: #f8f9fa;
+                padding: 15px;
+                border-radius: 8px;
+                margin-bottom: 15px;
+                border-left: 4px solid #667eea;
+            }
+            
+            .storage-bar {
+                width: 100%;
+                height: 20px;
+                background: #e2e8f0;
+                border-radius: 10px;
+                overflow: hidden;
+                margin-top: 10px;
+            }
+            
+            .storage-used {
+                height: 100%;
+                background: linear-gradient(135deg, #667eea, #764ba2);
+                transition: width 0.3s ease;
+            }
+            
+            .folder-item {
+                background: #fff8e1;
+                border-left: 4px solid #ffa000;
+            }
+            
+            .file-item {
+                background: white;
             }
         }
     </style>
 </head>
 <body>
     <div class="dashboard">
+        <div class="sidebar-overlay" id="sidebarOverlay"></div>
+        
         <header class="header">
-            <h1 id="currentModuleTitle">Dashboard</h1>
+            <div style="display: flex; align-items: center; gap: 15px;">
+                <button class="mobile-menu-btn" id="mobileMenuBtn">
+                    <i class="fas fa-bars"></i>
+                </button>
+                <h1 id="currentModuleTitle">Dashboard</h1>
+            </div>
             <div class="user-info">
                 <div class="user-avatar" id="userAvatar">A</div>
                 <span id="userName">Admin</span>
@@ -529,7 +770,7 @@
             </div>
         </header>
 
-        <nav class="sidebar">
+        <nav class="sidebar" id="sidebar">
             <div class="sidebar-header">
                 <h2><i class="fas fa-cloud"></i> Cloud-Termux</h2>
             </div>
@@ -568,6 +809,12 @@
                     <a href="#" class="nav-link" data-module="chat">
                         <i class="fas fa-comments"></i>
                         Chat
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#" class="nav-link" data-module="settings">
+                        <i class="fas fa-cog"></i>
+                        Configurações
                     </a>
                 </li>
             </ul>
@@ -640,7 +887,25 @@
                 </div>
 
                 <div class="card">
-                    <h3>Meus Arquivos</h3>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                        <h3>Meus Arquivos</h3>
+                        <div>
+                            <button class="btn" onclick="showModal('folderModal')" style="padding: 8px 16px; margin-right: 10px;">
+                                <i class="fas fa-folder-plus"></i> Nova Pasta
+                            </button>
+                            <div id="storageDisplay" style="font-size: 0.9rem; color: #666; margin-top: 5px;">
+                                Carregando...
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Navegação de pastas -->
+                    <div id="folderNavigation" style="margin-bottom: 15px; display: none;">
+                        <nav style="background: #f8f9fa; padding: 10px; border-radius: 6px; font-size: 0.9rem;">
+                            <span id="currentPath">📁 Pasta atual: /</span>
+                        </nav>
+                    </div>
+                    
                     <div id="filesList">
                         <p>Carregando arquivos...</p>
                     </div>
@@ -728,6 +993,42 @@
                             </button>
                         </div>
                     </div>
+                </div>
+            </div>
+            <!-- Settings Module -->
+            <div id="settings" class="module">
+                <div class="module-header">
+                    <h2 class="module-title">
+                        <i class="fas fa-cog"></i>
+                        Configurações
+                    </h2>
+                </div>
+
+                <div class="card">
+                    <h3><i class="fas fa-hdd"></i> Armazenamento</h3>
+                    <div id="storageInfo" style="margin-bottom: 20px;">
+                        <p>Carregando informações de armazenamento...</p>
+                    </div>
+                    
+                    <form id="storageConfigForm">
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="useExternalStorage"> Usar armazenamento externo
+                            </label>
+                        </div>
+                        <div class="form-group" id="externalPathGroup" style="display: none;">
+                            <label for="externalPath">Caminho do armazenamento externo:</label>
+                            <input type="text" id="externalPath" placeholder="/storage/3B07-4AB2/" 
+                                   title="Exemplo: /storage/3B07-4AB2/ para cartão SD">
+                            <small style="color: #666; font-size: 0.85rem; display: block; margin-top: 5px;">
+                                Exemplo para cartão SD: <code>/storage/3B07-4AB2/</code><br>
+                                Para Termux: <code>/data/data/com.termux/files/home/storage/shared/</code>
+                            </small>
+                        </div>
+                        <button type="submit" class="btn">
+                            <i class="fas fa-save"></i> Salvar Configurações
+                        </button>
+                    </form>
                 </div>
             </div>
         </main>
@@ -819,6 +1120,25 @@
                     <input type="text" id="noteTags" placeholder="trabalho, pessoal, importante">
                 </div>
                 <button type="submit" class="btn">Salvar Nota</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Folder Modal -->
+    <div id="folderModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Nova Pasta</h3>
+                <span class="close" onclick="hideModal('folderModal')">&times;</span>
+            </div>
+            <form id="folderForm">
+                <div class="form-group">
+                    <label for="folderName">Nome da Pasta</label>
+                    <input type="text" id="folderName" required placeholder="Ex: Documentos, Fotos, etc.">
+                </div>
+                <button type="submit" class="btn">
+                    <i class="fas fa-folder-plus"></i> Criar Pasta
+                </button>
             </form>
         </div>
     </div>

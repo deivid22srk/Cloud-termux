@@ -10,12 +10,100 @@ const mime = require('mime');
 const compression = require('compression');
 const helmet = require('helmet');
 const cors = require('cors');
+const { execSync } = require('child_process');
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIO(server);
 
 const PORT = process.env.PORT || 8080;
+
+// Configurações de armazenamento
+let STORAGE_CONFIG = {
+  uploadsPath: path.join(__dirname, 'public', 'uploads'),
+  externalStorage: false,
+  externalPath: ''
+};
+
+// Carregar configurações de armazenamento
+function loadStorageConfig() {
+  const configPath = path.join(__dirname, 'storage-config.json');
+  if (fs.existsSync(configPath)) {
+    try {
+      STORAGE_CONFIG = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      console.log('📁 Configurações de armazenamento carregadas:', STORAGE_CONFIG.externalStorage ? STORAGE_CONFIG.externalPath : 'Padrão');
+    } catch (error) {
+      console.error('❌ Erro ao carregar configurações de armazenamento:', error.message);
+    }
+  }
+}
+
+// Salvar configurações de armazenamento
+function saveStorageConfig() {
+  const configPath = path.join(__dirname, 'storage-config.json');
+  try {
+    fs.writeFileSync(configPath, JSON.stringify(STORAGE_CONFIG, null, 2));
+    console.log('✅ Configurações de armazenamento salvas');
+  } catch (error) {
+    console.error('❌ Erro ao salvar configurações:', error.message);
+  }
+}
+
+// Obter informações de espaço livre
+function getStorageInfo(storagePath) {
+  try {
+    let command;
+    if (process.platform === 'win32') {
+      // Windows
+      command = `dir /-c "${storagePath}"`;
+    } else {
+      // Linux/Termux
+      command = `df -h "${storagePath}"`;
+    }
+    
+    const output = execSync(command, { encoding: 'utf8' });
+    
+    if (process.platform === 'win32') {
+      // Parse Windows dir output
+      const lines = output.split('\n');
+      const lastLine = lines[lines.length - 2] || '';
+      const match = lastLine.match(/([0-9,]+)\s+bytes\s+free/);
+      if (match) {
+        const freeBytes = parseInt(match[1].replace(/,/g, ''));
+        return {
+          free: formatFileSize(freeBytes),
+          freeBytes: freeBytes,
+          total: 'N/A',
+          used: 'N/A'
+        };
+      }
+    } else {
+      // Parse Linux df output
+      const lines = output.split('\n');
+      const dataLine = lines[1] || '';
+      const parts = dataLine.split(/\s+/);
+      if (parts.length >= 4) {
+        return {
+          total: parts[1],
+          used: parts[2], 
+          free: parts[3],
+          percentage: parts[4],
+          freeBytes: parseInt(parts[3]) * 1024 // Convert KB to bytes
+        };
+      }
+    }
+  } catch (error) {
+    console.error('❌ Erro ao obter informações de storage:', error.message);
+  }
+  
+  return {
+    free: 'N/A',
+    total: 'N/A',
+    used: 'N/A',
+    percentage: 'N/A',
+    freeBytes: 0
+  };
+}
 
 // Sistema de banco adaptativo - detecta automaticamente qual usar
 let DB_TYPE = 'json'; // fallback padrão
@@ -24,6 +112,35 @@ let db = null;
 // Detectar e configurar sistema de banco de dados
 function initDatabaseSystem() {
   console.log('🔍 Detectando sistema de banco de dados disponível...');
+  
+  // Carregar configurações de armazenamento
+  loadStorageConfig();
+  
+  // Criar diretórios necessários
+  const dirs = ['database', 'temp'];
+  dirs.forEach(dir => {
+    const dirPath = path.join(__dirname, dir);
+    if (!fs.existsSync(dirPath)) {
+      fs.mkdirSync(dirPath, { recursive: true });
+      console.log(`📁 Diretório criado: ${dir}`);
+    }
+  });
+  
+  // Criar diretório de uploads (padrão ou externo)
+  const uploadsPath = STORAGE_CONFIG.externalStorage ? STORAGE_CONFIG.externalPath : STORAGE_CONFIG.uploadsPath;
+  if (!fs.existsSync(uploadsPath)) {
+    try {
+      fs.mkdirSync(uploadsPath, { recursive: true });
+      console.log(`📁 Diretório de uploads criado: ${uploadsPath}`);
+    } catch (error) {
+      console.error(`❌ Erro ao criar diretório de uploads: ${error.message}`);
+      // Fallback para diretório padrão
+      STORAGE_CONFIG.externalStorage = false;
+      if (!fs.existsSync(STORAGE_CONFIG.uploadsPath)) {
+        fs.mkdirSync(STORAGE_CONFIG.uploadsPath, { recursive: true });
+      }
+    }
+  }
   
   // Tentar better-sqlite3 primeiro
   try {
@@ -54,6 +171,7 @@ function initDatabaseSystem() {
   
   // Usar JSON como fallback
   console.log('📁 Usando armazenamento JSON como fallback');
+  console.log('✅ Modo totalmente compatível - sem dependências de compilação');
   DB_TYPE = 'json';
   return true;
 }
@@ -137,6 +255,7 @@ class DataManager {
           size INTEGER NOT NULL,
           mimetype TEXT,
           path TEXT NOT NULL,
+          folder TEXT DEFAULT '',
           shared BOOLEAN DEFAULT 0,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY(user_id) REFERENCES users(id)
@@ -207,16 +326,53 @@ class DataManager {
     return null;
   }
   
-  getFiles(userId) {
+  getFiles(userId, folder = '') {
     if (DB_TYPE === 'json') {
-      return this.data.files.filter(f => f.user_id === userId).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      return this.data.files
+        .filter(f => f.user_id === userId && (f.folder || '') === folder)
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     } else if (DB_TYPE === 'better-sqlite3') {
-      return db.prepare('SELECT * FROM files WHERE user_id = ? ORDER BY created_at DESC').all(userId);
+      return db.prepare('SELECT * FROM files WHERE user_id = ? AND folder = ? ORDER BY created_at DESC').all(userId, folder);
     }
     return [];
   }
   
-  addFile(userId, fileName, originalName, size, mimetype, filePath) {
+  createFolder(userId, folderName, parentFolder = '') {
+    const folderData = {
+      user_id: userId,
+      filename: folderName,
+      original_name: folderName,
+      size: 0,
+      mimetype: 'folder',
+      path: '',
+      folder: parentFolder,
+      shared: 0,
+      created_at: new Date().toISOString()
+    };
+    
+    if (DB_TYPE === 'json') {
+      folderData.id = this.data.files.length > 0 ? Math.max(...this.data.files.map(f => f.id)) + 1 : 1;
+      this.data.files.push(folderData);
+      this.saveJsonData();
+      return { lastInsertRowid: folderData.id };
+    } else if (DB_TYPE === 'better-sqlite3') {
+      const insert = db.prepare(`INSERT INTO files (user_id, filename, original_name, size, mimetype, path, folder) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+      return insert.run(userId, folderName, folderName, 0, 'folder', '', parentFolder);
+    }
+  }
+  
+  getFolders(userId, parentFolder = '') {
+    if (DB_TYPE === 'json') {
+      return this.data.files
+        .filter(f => f.user_id === userId && f.mimetype === 'folder' && (f.folder || '') === parentFolder)
+        .sort((a, b) => a.original_name.localeCompare(b.original_name));
+    } else if (DB_TYPE === 'better-sqlite3') {
+      return db.prepare('SELECT * FROM files WHERE user_id = ? AND mimetype = ? AND folder = ? ORDER BY original_name').all(userId, 'folder', parentFolder);
+    }
+    return [];
+  }
+  
+  addFile(userId, fileName, originalName, size, mimetype, filePath, folder = '') {
     const fileData = {
       user_id: userId,
       filename: fileName,
@@ -224,6 +380,7 @@ class DataManager {
       size: size,
       mimetype: mimetype,
       path: filePath,
+      folder: folder,
       shared: 0,
       created_at: new Date().toISOString()
     };
@@ -417,7 +574,7 @@ app.use(fileUpload({
   createParentPath: true,
   limits: { fileSize: 50 * 1024 * 1024 },
   useTempFiles: true,
-  tempFileDir: '/tmp/',
+  tempFileDir: path.join(__dirname, 'temp'), // Usar pasta local ao invés de /tmp/
   debug: false
 }));
 
@@ -497,16 +654,30 @@ app.post('/api/upload', requireAuth, (req, res) => {
   }
   
   const file = req.files.file;
+  const folder = req.body.folder || '';
   const fileName = Date.now() + '-' + file.name;
-  const uploadPath = path.join(__dirname, 'public', 'uploads', fileName);
+  
+  // Usar pasta configurada (externa ou padrão)
+  const baseUploadPath = STORAGE_CONFIG.externalStorage ? STORAGE_CONFIG.externalPath : STORAGE_CONFIG.uploadsPath;
+  const folderPath = folder ? path.join(baseUploadPath, folder) : baseUploadPath;
+  const uploadPath = path.join(folderPath, fileName);
+  
+  // Criar pasta se não existir
+  try {
+    if (!fs.existsSync(folderPath)) {
+      fs.mkdirSync(folderPath, { recursive: true });
+    }
+  } catch (error) {
+    return res.status(500).json({ error: 'Erro ao criar pasta de destino: ' + error.message });
+  }
   
   file.mv(uploadPath, (err) => {
     if (err) {
-      return res.status(500).json({ error: 'Erro ao salvar arquivo' });
+      return res.status(500).json({ error: 'Erro ao salvar arquivo: ' + err.message });
     }
     
     try {
-      const result = dataManager.addFile(req.session.user.id, fileName, file.name, file.size, file.mimetype, uploadPath);
+      const result = dataManager.addFile(req.session.user.id, fileName, file.name, file.size, file.mimetype, uploadPath, folder);
       res.json({ success: true, fileId: result.lastInsertRowid, fileName: file.name });
     } catch (error) {
       console.error('Erro ao salvar arquivo:', error);
@@ -516,9 +687,11 @@ app.post('/api/upload', requireAuth, (req, res) => {
 });
 
 app.get('/api/files', requireAuth, (req, res) => {
+  const folder = req.query.folder || '';
   try {
-    const files = dataManager.getFiles(req.session.user.id);
-    res.json(files);
+    const files = dataManager.getFiles(req.session.user.id, folder);
+    const folders = dataManager.getFolders(req.session.user.id, folder);
+    res.json({ files, folders });
   } catch (error) {
     console.error('Erro ao buscar arquivos:', error);
     res.status(500).json({ error: 'Erro ao buscar arquivos' });
@@ -535,15 +708,129 @@ app.delete('/api/files/:id', requireAuth, (req, res) => {
       return res.status(404).json({ error: 'Arquivo não encontrado' });
     }
     
-    // Deletar arquivo físico
-    fs.unlink(file.path, (unlinkErr) => {
-      // Continue mesmo se houver erro ao deletar o arquivo físico
-    });
+    // Deletar arquivo físico (se não for pasta)
+    if (file.mimetype !== 'folder' && file.path) {
+      fs.unlink(file.path, (unlinkErr) => {
+        if (unlinkErr) console.log('Arquivo físico já removido ou não encontrado');
+      });
+    }
     
     res.json({ success: true });
   } catch (error) {
     console.error('Erro ao deletar arquivo:', error);
     res.status(500).json({ error: 'Erro ao deletar arquivo' });
+  }
+});
+
+// ROTA PARA DOWNLOAD DE ARQUIVOS
+app.get('/api/download/:id', requireAuth, (req, res) => {
+  const fileId = req.params.id;
+  
+  try {
+    let file;
+    if (DB_TYPE === 'json') {
+      file = dataManager.data.files.find(f => f.id == fileId && f.user_id == req.session.user.id);
+    } else if (DB_TYPE === 'better-sqlite3') {
+      file = db.prepare('SELECT * FROM files WHERE id = ? AND user_id = ?').get(fileId, req.session.user.id);
+    }
+    
+    if (!file || file.mimetype === 'folder') {
+      return res.status(404).json({ error: 'Arquivo não encontrado' });
+    }
+    
+    if (!fs.existsSync(file.path)) {
+      return res.status(404).json({ error: 'Arquivo não encontrado no disco' });
+    }
+    
+    // Configurar headers para download
+    res.setHeader('Content-Disposition', `attachment; filename="${file.original_name}"`);
+    res.setHeader('Content-Type', file.mimetype || 'application/octet-stream');
+    
+    // Enviar arquivo
+    const fileStream = fs.createReadStream(file.path);
+    fileStream.pipe(res);
+    
+  } catch (error) {
+    console.error('Erro ao fazer download:', error);
+    res.status(500).json({ error: 'Erro ao fazer download do arquivo' });
+  }
+});
+
+// ROTA PARA CRIAR PASTAS
+app.post('/api/folders', requireAuth, (req, res) => {
+  const { name, parentFolder } = req.body;
+  
+  if (!name || name.trim() === '') {
+    return res.status(400).json({ error: 'Nome da pasta é obrigatório' });
+  }
+  
+  try {
+    const result = dataManager.createFolder(req.session.user.id, name.trim(), parentFolder || '');
+    res.json({ success: true, folderId: result.lastInsertRowid });
+  } catch (error) {
+    console.error('Erro ao criar pasta:', error);
+    res.status(500).json({ error: 'Erro ao criar pasta' });
+  }
+});
+
+// ROTA PARA INFORMAÇÕES DE STORAGE
+app.get('/api/storage/info', requireAuth, (req, res) => {
+  try {
+    const storagePath = STORAGE_CONFIG.externalStorage ? STORAGE_CONFIG.externalPath : STORAGE_CONFIG.uploadsPath;
+    const storageInfo = getStorageInfo(storagePath);
+    
+    res.json({
+      ...storageInfo,
+      path: storagePath,
+      external: STORAGE_CONFIG.externalStorage
+    });
+  } catch (error) {
+    console.error('Erro ao obter informações de storage:', error);
+    res.status(500).json({ error: 'Erro ao obter informações de storage' });
+  }
+});
+
+// ROTA PARA CONFIGURAÇÕES DE STORAGE
+app.get('/api/storage/config', requireAuth, (req, res) => {
+  res.json(STORAGE_CONFIG);
+});
+
+app.post('/api/storage/config', requireAuth, (req, res) => {
+  const { externalStorage, externalPath } = req.body;
+  
+  try {
+    if (externalStorage && externalPath) {
+      // Verificar se o caminho existe e é acessível
+      if (!fs.existsSync(externalPath)) {
+        try {
+          fs.mkdirSync(externalPath, { recursive: true });
+        } catch (error) {
+          return res.status(400).json({ error: 'Não foi possível acessar ou criar o diretório especificado' });
+        }
+      }
+      
+      // Testar escrita
+      const testFile = path.join(externalPath, '.test-write');
+      try {
+        fs.writeFileSync(testFile, 'test');
+        fs.unlinkSync(testFile);
+      } catch (error) {
+        return res.status(400).json({ error: 'Sem permissão de escrita no diretório especificado' });
+      }
+      
+      STORAGE_CONFIG.externalStorage = true;
+      STORAGE_CONFIG.externalPath = externalPath;
+    } else {
+      STORAGE_CONFIG.externalStorage = false;
+      STORAGE_CONFIG.externalPath = '';
+    }
+    
+    saveStorageConfig();
+    res.json({ success: true, config: STORAGE_CONFIG });
+    
+  } catch (error) {
+    console.error('Erro ao salvar configurações de storage:', error);
+    res.status(500).json({ error: 'Erro ao salvar configurações' });
   }
 });
 
@@ -671,6 +958,15 @@ io.on('connection', (socket) => {
     console.log('Usuário desconectado:', socket.id);
   });
 });
+
+// Formatar tamanho de arquivo
+function formatFileSize(bytes) {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
 
 // Inicializar aplicação
 server.listen(PORT, () => {
