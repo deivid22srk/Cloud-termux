@@ -6,9 +6,12 @@ let folders = [];
 let contacts = [];
 let events = [];
 let notes = [];
+let downloads = [];
 let currentFolder = '';
 let storageConfig = {};
 let storageInfo = {};
+let uploadStartTime = null;
+let uploadSpeed = 0;
 
 // Inicialização
 document.addEventListener('DOMContentLoaded', function() {
@@ -76,6 +79,9 @@ async function initializeApp() {
     // Configurar formulários
     setupForms();
     
+    // Configurar formulário de download
+    setupDownloadForm();
+    
     // Configurar formulário de pastas
     setupFolderForm();
     
@@ -102,6 +108,39 @@ function initializeSocket() {
 
     socket.on('chat message', (data) => {
         addMessageToChat(data);
+    });
+    
+    // Eventos de download
+    socket.on('download_progress', (data) => {
+        updateDownloadProgress(data);
+    });
+    
+    socket.on('download_completed', (data) => {
+        updateDownloadStatus(data.downloadId, 'completed');
+        loadDownloads(); // Recarregar lista
+    });
+    
+    socket.on('download_error', (data) => {
+        updateDownloadStatus(data.downloadId, 'error', data.error);
+    });
+    
+    // Eventos de upload
+    socket.on('upload_started', (data) => {
+        if (data.userId === currentUser.id) {
+            showUploadProgress(data);
+        }
+    });
+    
+    socket.on('upload_completed', (data) => {
+        if (data.userId === currentUser.id) {
+            showUploadComplete(data);
+        }
+    });
+    
+    socket.on('upload_error', (data) => {
+        if (data.userId === currentUser.id) {
+            showUploadError(data);
+        }
     });
 
     socket.on('disconnect', () => {
@@ -154,6 +193,7 @@ function showModule(moduleName) {
     switch(moduleName) {
         case 'files':
             loadFiles();
+            loadDownloads();
             break;
         case 'contacts':
             loadContacts();
@@ -182,7 +222,8 @@ async function loadAllData() {
         loadNotes(),
         loadChatMessages(),
         loadStorageInfo(),
-        loadStorageConfig()
+        loadStorageConfig(),
+        loadDownloads()
     ]);
     updateDashboardStats();
 }
@@ -231,17 +272,61 @@ function handleFiles(files) {
     Array.from(files).forEach(file => uploadFile(file));
 }
 
+function showUploadProgress(data) {
+    const uploadProgress = document.getElementById('uploadProgress');
+    const uploadStatus = document.getElementById('uploadStatus');
+    const uploadSpeedDisplay = document.getElementById('uploadSpeedDisplay');
+    
+    uploadProgress.style.display = 'block';
+    uploadStatus.textContent = `Enviando ${data.fileName}...`;
+    uploadSpeedDisplay.textContent = 'Calculando velocidade...';
+    
+    uploadStartTime = Date.now();
+}
+
+function showUploadComplete(data) {
+    const uploadStatus = document.getElementById('uploadStatus');
+    const uploadSpeedDisplay = document.getElementById('uploadSpeedDisplay');
+    const progressBar = document.getElementById('progressBar');
+    
+    progressBar.style.width = '100%';
+    uploadStatus.textContent = `${data.fileName} enviado com sucesso!`;
+    uploadSpeedDisplay.textContent = `Velocidade: ${formatSpeed(data.uploadSpeed)} | Duração: ${data.duration.toFixed(1)}s`;
+    
+    setTimeout(() => {
+        document.getElementById('uploadProgress').style.display = 'none';
+        progressBar.style.width = '0%';
+    }, 3000);
+    
+    loadFiles(currentFolder);
+    loadStorageInfo();
+}
+
+function showUploadError(data) {
+    const uploadStatus = document.getElementById('uploadStatus');
+    const uploadSpeedDisplay = document.getElementById('uploadSpeedDisplay');
+    
+    uploadStatus.textContent = data.error;
+    uploadSpeedDisplay.textContent = '';
+}
+
 async function uploadFile(file) {
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('folder', currentFolder); // Incluir pasta atual
+    formData.append('folder', currentFolder);
 
     const progressBar = document.getElementById('progressBar');
     const uploadStatus = document.getElementById('uploadStatus');
+    const uploadSpeedDisplay = document.getElementById('uploadSpeedDisplay');
     const uploadProgress = document.getElementById('uploadProgress');
 
     uploadProgress.style.display = 'block';
     uploadStatus.textContent = `Enviando ${file.name}...`;
+    uploadSpeedDisplay.textContent = 'Preparando...';
+    
+    let uploadStartTime = Date.now();
+    let lastLoaded = 0;
+    let lastTime = uploadStartTime;
 
     try {
         const xhr = new XMLHttpRequest();
@@ -250,26 +335,49 @@ async function uploadFile(file) {
             if (e.lengthComputable) {
                 const percentage = (e.loaded / e.total) * 100;
                 progressBar.style.width = percentage + '%';
+                
+                // Calcular velocidade de upload
+                const currentTime = Date.now();
+                const timeDiff = (currentTime - lastTime) / 1000;
+                const dataDiff = e.loaded - lastLoaded;
+                
+                if (timeDiff > 0.5) { // Atualizar a cada 0.5 segundos
+                    const currentSpeed = dataDiff / timeDiff;
+                    const overallTime = (currentTime - uploadStartTime) / 1000;
+                    const overallSpeed = e.loaded / overallTime;
+                    
+                    uploadSpeedDisplay.textContent = `Velocidade: ${formatSpeed(overallSpeed)} | Progresso: ${percentage.toFixed(1)}%`;
+                    
+                    lastTime = currentTime;
+                    lastLoaded = e.loaded;
+                }
             }
         });
 
         xhr.addEventListener('load', () => {
             if (xhr.status === 200) {
                 const response = JSON.parse(xhr.responseText);
+                const totalTime = (Date.now() - uploadStartTime) / 1000;
+                const finalSpeed = file.size / totalTime;
+                
                 uploadStatus.textContent = `${file.name} enviado com sucesso!`;
+                uploadSpeedDisplay.textContent = `Velocidade Final: ${formatSpeed(finalSpeed)} | Duração: ${totalTime.toFixed(1)}s`;
+                
                 setTimeout(() => {
                     uploadProgress.style.display = 'none';
                     progressBar.style.width = '0%';
-                }, 2000);
+                }, 3000);
                 loadFiles(currentFolder);
-                loadStorageInfo(); // Atualizar info de storage
+                loadStorageInfo();
             } else {
                 uploadStatus.textContent = 'Erro ao enviar arquivo.';
+                uploadSpeedDisplay.textContent = '';
             }
         });
 
         xhr.addEventListener('error', () => {
             uploadStatus.textContent = 'Erro de conexão.';
+            uploadSpeedDisplay.textContent = '';
         });
 
         xhr.open('POST', '/api/upload');
@@ -278,6 +386,7 @@ async function uploadFile(file) {
     } catch (error) {
         console.error('Erro no upload:', error);
         uploadStatus.textContent = 'Erro ao enviar arquivo.';
+        uploadSpeedDisplay.textContent = '';
     }
 }
 
@@ -1024,6 +1133,243 @@ async function logout() {
         console.error('Erro ao fazer logout:', error);
         window.location.href = '/login';
     }
+}
+
+// === GERENCIAMENTO DE DOWNLOADS ===
+async function loadDownloads() {
+    try {
+        const response = await fetch('/api/downloads');
+        if (response.ok) {
+            downloads = await response.json();
+            displayDownloads();
+        }
+    } catch (error) {
+        console.error('Erro ao carregar downloads:', error);
+    }
+}
+
+function displayDownloads() {
+    const downloadsList = document.getElementById('downloadsList');
+    
+    if (downloads.length === 0) {
+        downloadsList.innerHTML = '<p>Nenhum download encontrado. Adicione o primeiro download!</p>';
+        return;
+    }
+    
+    downloadsList.innerHTML = downloads.map(download => {
+        const progress = download.progress || 0;
+        const status = download.status || 'pending';
+        const speed = download.download_speed || 0;
+        const downloadedSize = download.downloaded_size || 0;
+        const totalSize = download.file_size || 0;
+        
+        return `
+            <div class="download-item" id="download-${download.id}">
+                <div class="download-header">
+                    <div>
+                        <div class="download-filename">
+                            <i class="fas fa-download"></i> ${download.original_filename || download.filename}
+                        </div>
+                        <div class="download-url">${download.url}</div>
+                    </div>
+                    <div class="download-controls">
+                        <span class="status-badge status-${status}">${getStatusText(status)}</span>
+                        ${getDownloadControls(download)}
+                    </div>
+                </div>
+                
+                ${status === 'downloading' || status === 'paused' || progress > 0 ? `
+                    <div class="download-progress-container">
+                        <div class="download-progress-bar">
+                            <div class="download-progress-fill" style="width: ${progress}%"></div>
+                        </div>
+                        <div class="download-stats">
+                            <span>${formatFileSize(downloadedSize)} / ${totalSize > 0 ? formatFileSize(totalSize) : 'Desconhecido'}</span>
+                            <span>${progress.toFixed(1)}%</span>
+                            <span>${speed > 0 ? formatSpeed(speed) : '-'}</span>
+                        </div>
+                    </div>
+                ` : ''}
+                
+                ${download.error_message ? `
+                    <div style="color: #e53e3e; font-size: 0.9rem; margin-top: 10px;">
+                        <i class="fas fa-exclamation-triangle"></i> ${download.error_message}
+                    </div>
+                ` : ''}
+            </div>
+        `;
+    }).join('');
+}
+
+function getStatusText(status) {
+    const statusTexts = {
+        'pending': 'Pendente',
+        'downloading': 'Baixando',
+        'paused': 'Pausado',
+        'completed': 'Concluído',
+        'error': 'Erro'
+    };
+    return statusTexts[status] || status;
+}
+
+function getDownloadControls(download) {
+    const status = download.status;
+    let controls = '';
+    
+    if (status === 'downloading') {
+        controls += `<button class="btn btn-pause btn-sm" onclick="pauseDownload(${download.id})">
+                        <i class="fas fa-pause"></i>
+                     </button>`;
+    } else if (status === 'paused') {
+        controls += `<button class="btn btn-resume btn-sm" onclick="resumeDownload(${download.id})">
+                        <i class="fas fa-play"></i>
+                     </button>`;
+    } else if (status === 'completed') {
+        controls += `<button class="btn btn-download btn-sm" onclick="window.open('/api/download/${download.id}', '_blank')">
+                        <i class="fas fa-download"></i>
+                     </button>`;
+    }
+    
+    if (status !== 'completed') {
+        controls += `<button class="btn btn-cancel btn-sm" onclick="cancelDownload(${download.id})">
+                        <i class="fas fa-times"></i>
+                     </button>`;
+    }
+    
+    return controls;
+}
+
+function setupDownloadForm() {
+    document.getElementById('downloadForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const url = document.getElementById('downloadUrl').value.trim();
+        
+        if (!url) {
+            alert('URL é obrigatória');
+            return;
+        }
+        
+        try {
+            const response = await fetch('/api/downloads', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url })
+            });
+
+            if (response.ok) {
+                hideModal('downloadModal');
+                document.getElementById('downloadForm').reset();
+                loadDownloads();
+            } else {
+                const error = await response.json();
+                alert(error.error || 'Erro ao criar download');
+            }
+        } catch (error) {
+            console.error('Erro ao criar download:', error);
+            alert('Erro ao criar download');
+        }
+    });
+}
+
+async function pauseDownload(downloadId) {
+    try {
+        const response = await fetch(`/api/downloads/${downloadId}/pause`, {
+            method: 'POST'
+        });
+        
+        if (response.ok) {
+            loadDownloads();
+        } else {
+            alert('Erro ao pausar download');
+        }
+    } catch (error) {
+        console.error('Erro ao pausar download:', error);
+        alert('Erro ao pausar download');
+    }
+}
+
+async function resumeDownload(downloadId) {
+    try {
+        const response = await fetch(`/api/downloads/${downloadId}/resume`, {
+            method: 'POST'
+        });
+        
+        if (response.ok) {
+            loadDownloads();
+        } else {
+            alert('Erro ao resumir download');
+        }
+    } catch (error) {
+        console.error('Erro ao resumir download:', error);
+        alert('Erro ao resumir download');
+    }
+}
+
+async function cancelDownload(downloadId) {
+    if (!confirm('Tem certeza que deseja cancelar este download?')) return;
+    
+    try {
+        const response = await fetch(`/api/downloads/${downloadId}`, {
+            method: 'DELETE'
+        });
+        
+        if (response.ok) {
+            loadDownloads();
+        } else {
+            alert('Erro ao cancelar download');
+        }
+    } catch (error) {
+        console.error('Erro ao cancelar download:', error);
+        alert('Erro ao cancelar download');
+    }
+}
+
+function updateDownloadProgress(data) {
+    const downloadElement = document.getElementById(`download-${data.downloadId}`);
+    if (!downloadElement) return;
+    
+    const progressFill = downloadElement.querySelector('.download-progress-fill');
+    const statsElements = downloadElement.querySelectorAll('.download-stats span');
+    
+    if (progressFill) {
+        progressFill.style.width = data.progress + '%';
+    }
+    
+    if (statsElements.length >= 3) {
+        statsElements[0].textContent = `${formatFileSize(data.downloadedSize)} / ${formatFileSize(data.totalSize)}`;
+        statsElements[1].textContent = `${data.progress.toFixed(1)}%`;
+        statsElements[2].textContent = formatSpeed(data.speed);
+    }
+}
+
+function updateDownloadStatus(downloadId, status, error = null) {
+    const downloadElement = document.getElementById(`download-${downloadId}`);
+    if (!downloadElement) return;
+    
+    const statusBadge = downloadElement.querySelector('.status-badge');
+    if (statusBadge) {
+        statusBadge.className = `status-badge status-${status}`;
+        statusBadge.textContent = getStatusText(status);
+    }
+    
+    if (error) {
+        const errorDiv = document.createElement('div');
+        errorDiv.style.cssText = 'color: #e53e3e; font-size: 0.9rem; margin-top: 10px;';
+        errorDiv.innerHTML = `<i class="fas fa-exclamation-triangle"></i> ${error}`;
+        downloadElement.appendChild(errorDiv);
+    }
+    
+    // Atualizar controles
+    setTimeout(() => loadDownloads(), 1000);
+}
+
+function formatSpeed(bytesPerSecond) {
+    if (bytesPerSecond === 0) return '0 B/s';
+    const k = 1024;
+    const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+    const i = Math.floor(Math.log(bytesPerSecond) / Math.log(k));
+    return parseFloat((bytesPerSecond / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
 // === UTILIDADES ===

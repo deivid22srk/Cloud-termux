@@ -716,6 +716,122 @@
                 margin-left: 5px;
             }
             
+            .download-item {
+                background: white;
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+                padding: 15px;
+                margin-bottom: 10px;
+                transition: all 0.3s ease;
+            }
+            
+            .download-item:hover {
+                box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            }
+            
+            .download-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 10px;
+            }
+            
+            .download-filename {
+                font-weight: bold;
+                color: #333;
+                margin-bottom: 5px;
+            }
+            
+            .download-url {
+                font-size: 0.85rem;
+                color: #666;
+                word-break: break-all;
+            }
+            
+            .download-progress-container {
+                margin: 10px 0;
+            }
+            
+            .download-progress-bar {
+                width: 100%;
+                height: 8px;
+                background: #e0e0e0;
+                border-radius: 4px;
+                overflow: hidden;
+                margin-bottom: 5px;
+            }
+            
+            .download-progress-fill {
+                height: 100%;
+                background: linear-gradient(135deg, #667eea, #764ba2);
+                transition: width 0.3s ease;
+            }
+            
+            .download-stats {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                font-size: 0.8rem;
+                color: #666;
+            }
+            
+            .download-controls {
+                display: flex;
+                gap: 5px;
+                align-items: center;
+            }
+            
+            .btn-sm {
+                padding: 4px 8px;
+                font-size: 0.75rem;
+                min-height: 32px;
+            }
+            
+            .btn-pause {
+                background: linear-gradient(135deg, #f6ad55, #ed8936);
+            }
+            
+            .btn-resume {
+                background: linear-gradient(135deg, #38a169, #2f855a);
+            }
+            
+            .btn-cancel {
+                background: linear-gradient(135deg, #e53e3e, #c53030);
+            }
+            
+            .status-badge {
+                padding: 2px 8px;
+                border-radius: 12px;
+                font-size: 0.7rem;
+                font-weight: bold;
+                text-transform: uppercase;
+            }
+            
+            .status-pending {
+                background: #fff3cd;
+                color: #856404;
+            }
+            
+            .status-downloading {
+                background: #cce5ff;
+                color: #004085;
+            }
+            
+            .status-paused {
+                background: #fff3cd;
+                color: #856404;
+            }
+            
+            .status-completed {
+                background: #d4edda;
+                color: #155724;
+            }
+            
+            .status-error {
+                background: #f8d7da;
+                color: #721c24;
+            }
+            
             .storage-info {
                 background: #f8f9fa;
                 padding: 15px;
@@ -746,6 +862,28 @@
             
             .file-item {
                 background: white;
+            }
+            
+            .download-item {
+                margin-bottom: 15px;
+                padding: 15px;
+            }
+            
+            .download-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+            }
+            
+            .download-controls {
+                width: 100%;
+                justify-content: space-between;
+            }
+            
+            .download-stats {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 5px;
             }
         }
     </style>
@@ -874,7 +1012,7 @@
                     <div class="upload-area" id="uploadArea">
                         <i class="fas fa-cloud-upload-alt" style="font-size: 3rem; color: #667eea; margin-bottom: 15px;"></i>
                         <h3>Arraste arquivos aqui ou clique para selecionar</h3>
-                        <p>Máximo 50MB por arquivo</p>
+                        <p>Sem limite de tamanho</p>
                         <input type="file" id="fileInput" multiple style="display: none;">
                     </div>
 
@@ -883,6 +1021,20 @@
                             <div id="progressBar" style="height: 20px; background: linear-gradient(135deg, #667eea, #764ba2); width: 0%; transition: width 0.3s ease;"></div>
                         </div>
                         <p id="uploadStatus" style="margin-top: 10px; text-align: center;"></p>
+                        <div id="uploadSpeedDisplay" style="margin-top: 10px; text-align: center; font-size: 0.9rem; color: #666;"></div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                        <h3><i class="fas fa-download"></i> Gerenciador de Downloads</h3>
+                        <button class="btn" onclick="showModal('downloadModal')" style="padding: 8px 16px;">
+                            <i class="fas fa-plus"></i> Novo Download
+                        </button>
+                    </div>
+                    
+                    <div id="downloadsList">
+                        <p>Carregando downloads...</p>
                     </div>
                 </div>
 
@@ -1138,6 +1290,28 @@
                 </div>
                 <button type="submit" class="btn">
                     <i class="fas fa-folder-plus"></i> Criar Pasta
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Download Modal -->
+    <div id="downloadModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Novo Download</h3>
+                <span class="close" onclick="hideModal('downloadModal')">&times;</span>
+            </div>
+            <form id="downloadForm">
+                <div class="form-group">
+                    <label for="downloadUrl">URL do Arquivo</label>
+                    <input type="url" id="downloadUrl" required placeholder="https://exemplo.com/arquivo.zip">
+                    <small style="color: #666; font-size: 0.85rem; display: block; margin-top: 5px;">
+                        Digite a URL completa do arquivo que você deseja baixar
+                    </small>
+                </div>
+                <button type="submit" class="btn">
+                    <i class="fas fa-download"></i> Iniciar Download
                 </button>
             </form>
         </div>
