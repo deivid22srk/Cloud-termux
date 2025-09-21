@@ -11,6 +11,8 @@ const mime = require('mime');
 const compression = require('compression');
 const helmet = require('helmet');
 const cors = require('cors');
+const https = require('https');
+const url = require('url');
 
 const app = express();
 const server = http.createServer(app);
@@ -32,7 +34,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public'));
 app.use(fileUpload({
   createParentPath: true,
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limite
+  limits: { fileSize: 10 * 1024 * 1024 * 1024 }, // 10GB limite (sem limite prático)
   useTempFiles: true,
   tempFileDir: '/tmp/',
   debug: false
@@ -129,6 +131,27 @@ function initDatabase() {
       FOREIGN KEY(user_id) REFERENCES users(id)
     )`);
     
+    // Tabela de downloads
+    db.exec(`CREATE TABLE IF NOT EXISTS downloads (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      url TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      original_filename TEXT,
+      file_path TEXT,
+      file_size INTEGER DEFAULT 0,
+      downloaded_size INTEGER DEFAULT 0,
+      download_speed REAL DEFAULT 0,
+      status TEXT DEFAULT 'pending',
+      progress REAL DEFAULT 0,
+      error_message TEXT,
+      started_at DATETIME,
+      completed_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    )`);
+    
     // Criar usuário admin padrão
     const adminPassword = bcrypt.hashSync('admin123', 10);
     const insertAdmin = db.prepare(`INSERT OR IGNORE INTO users (username, password, email) VALUES (?, ?, ?)`);
@@ -212,8 +235,27 @@ app.post('/api/upload', requireAuth, (req, res) => {
   const fileName = Date.now() + '-' + file.name;
   const uploadPath = path.join(__dirname, 'public', 'uploads', fileName);
   
+  const uploadStartTime = Date.now();
+  const uploadId = 'upload_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+  
+  // Emitir evento de início de upload
+  io.emit('upload_started', {
+    uploadId,
+    fileName: file.name,
+    fileSize: file.size,
+    userId: req.session.user.id
+  });
+  
   file.mv(uploadPath, (err) => {
+    const uploadEndTime = Date.now();
+    const uploadDuration = (uploadEndTime - uploadStartTime) / 1000; // em segundos
+    const uploadSpeed = file.size / uploadDuration; // bytes por segundo
+    
     if (err) {
+      io.emit('upload_error', {
+        uploadId,
+        error: 'Erro ao salvar arquivo'
+      });
       return res.status(500).json({ error: 'Erro ao salvar arquivo' });
     }
     
@@ -223,9 +265,29 @@ app.post('/api/upload', requireAuth, (req, res) => {
       const result = insert.run(req.session.user.id, fileName, file.name, file.size, file.mimetype, uploadPath);
       db.close();
       
-      res.json({ success: true, fileId: result.lastInsertRowid, fileName: file.name });
+      // Emitir evento de conclusão de upload com velocidade
+      io.emit('upload_completed', {
+        uploadId,
+        fileName: file.name,
+        fileSize: file.size,
+        uploadSpeed,
+        duration: uploadDuration,
+        userId: req.session.user.id
+      });
+      
+      res.json({ 
+        success: true, 
+        fileId: result.lastInsertRowid, 
+        fileName: file.name, 
+        uploadSpeed: uploadSpeed,
+        duration: uploadDuration
+      });
     } catch (error) {
       console.error('Erro ao salvar arquivo:', error);
+      io.emit('upload_error', {
+        uploadId,
+        error: 'Erro ao salvar informações do arquivo'
+      });
       res.status(500).json({ error: 'Erro ao salvar informações do arquivo' });
     }
   });
@@ -373,6 +435,134 @@ app.post('/api/notes', requireAuth, (req, res) => {
   }
 });
 
+// ROTAS DE DOWNLOADS
+app.get('/api/downloads', requireAuth, (req, res) => {
+  try {
+    const db = new Database(DB_PATH);
+    const downloads = db.prepare('SELECT * FROM downloads WHERE user_id = ? ORDER BY created_at DESC').all(req.session.user.id);
+    db.close();
+    res.json(downloads);
+  } catch (error) {
+    console.error('Erro ao buscar downloads:', error);
+    res.status(500).json({ error: 'Erro ao buscar downloads' });
+  }
+});
+
+app.post('/api/downloads', requireAuth, (req, res) => {
+  const { url } = req.body;
+  
+  if (!url) {
+    return res.status(400).json({ error: 'URL é obrigatória' });
+  }
+  
+  try {
+    // Extrair nome do arquivo da URL
+    let filename = path.basename(new URL(url).pathname);
+    if (!filename || filename === '/') {
+      filename = 'download_' + Date.now();
+    }
+    
+    const db = new Database(DB_PATH);
+    const insert = db.prepare(`INSERT INTO downloads (user_id, url, filename, original_filename, status) VALUES (?, ?, ?, ?, 'pending')`);
+    const result = insert.run(req.session.user.id, url, filename, filename);
+    db.close();
+    
+    // Iniciar download
+    startDownload(result.lastInsertRowid, url);
+    
+    res.json({ success: true, downloadId: result.lastInsertRowid });
+  } catch (error) {
+    console.error('Erro ao criar download:', error);
+    res.status(500).json({ error: 'Erro ao criar download' });
+  }
+});
+
+app.post('/api/downloads/:id/pause', requireAuth, (req, res) => {
+  const downloadId = req.params.id;
+  
+  try {
+    const db = new Database(DB_PATH);
+    const download = db.prepare('SELECT * FROM downloads WHERE id = ? AND user_id = ?').get(downloadId, req.session.user.id);
+    
+    if (!download) {
+      db.close();
+      return res.status(404).json({ error: 'Download não encontrado' });
+    }
+    
+    // Atualizar status
+    const update = db.prepare('UPDATE downloads SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
+    update.run('paused', downloadId);
+    db.close();
+    
+    // Pausar download
+    pauseDownload(downloadId);
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Erro ao pausar download:', error);
+    res.status(500).json({ error: 'Erro ao pausar download' });
+  }
+});
+
+app.post('/api/downloads/:id/resume', requireAuth, (req, res) => {
+  const downloadId = req.params.id;
+  
+  try {
+    const db = new Database(DB_PATH);
+    const download = db.prepare('SELECT * FROM downloads WHERE id = ? AND user_id = ?').get(downloadId, req.session.user.id);
+    
+    if (!download) {
+      db.close();
+      return res.status(404).json({ error: 'Download não encontrado' });
+    }
+    
+    // Atualizar status
+    const update = db.prepare('UPDATE downloads SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
+    update.run('downloading', downloadId);
+    db.close();
+    
+    // Resumir download
+    resumeDownload(downloadId, download.url, download.downloaded_size || 0);
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Erro ao resumir download:', error);
+    res.status(500).json({ error: 'Erro ao resumir download' });
+  }
+});
+
+app.delete('/api/downloads/:id', requireAuth, (req, res) => {
+  const downloadId = req.params.id;
+  
+  try {
+    const db = new Database(DB_PATH);
+    const download = db.prepare('SELECT * FROM downloads WHERE id = ? AND user_id = ?').get(downloadId, req.session.user.id);
+    
+    if (!download) {
+      db.close();
+      return res.status(404).json({ error: 'Download não encontrado' });
+    }
+    
+    // Cancelar download se estiver ativo
+    cancelDownload(downloadId);
+    
+    // Deletar arquivo se existir
+    if (download.file_path && fs.existsSync(download.file_path)) {
+      fs.unlinkSync(download.file_path);
+    }
+    
+    // Deletar registro
+    const deleteStmt = db.prepare('DELETE FROM downloads WHERE id = ?');
+    deleteStmt.run(downloadId);
+    db.close();
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Erro ao cancelar download:', error);
+    res.status(500).json({ error: 'Erro ao cancelar download' });
+  }
+});
+
 // CHAT COM SOCKET.IO
 app.get('/api/chat/messages', requireAuth, (req, res) => {
   try {
@@ -413,10 +603,217 @@ io.on('connection', (socket) => {
     }
   });
   
+  // Eventos de upload em tempo real
+  socket.on('upload_progress', (data) => {
+    if (socket.userData) {
+      socket.broadcast.emit('upload_progress', {
+        ...data,
+        userId: socket.userData.id
+      });
+    }
+  });
+  
   socket.on('disconnect', () => {
     console.log('Usuário desconectado:', socket.id);
   });
 });
+
+// === GERENCIAMENTO DE DOWNLOADS ===
+const activeDownloads = new Map();
+
+function startDownload(downloadId, downloadUrl) {
+  if (activeDownloads.has(downloadId)) {
+    return; // Download já está ativo
+  }
+  
+  const downloadInfo = {
+    id: downloadId,
+    url: downloadUrl,
+    startTime: Date.now(),
+    paused: false,
+    cancelled: false
+  };
+  
+  activeDownloads.set(downloadId, downloadInfo);
+  
+  performDownload(downloadId, downloadUrl, 0);
+}
+
+function performDownload(downloadId, downloadUrl, resumeFrom = 0) {
+  const downloadInfo = activeDownloads.get(downloadId);
+  if (!downloadInfo || downloadInfo.cancelled) return;
+  
+  try {
+    const db = new Database(DB_PATH);
+    const download = db.prepare('SELECT * FROM downloads WHERE id = ?').get(downloadId);
+    
+    if (!download) {
+      db.close();
+      return;
+    }
+    
+    const parsedUrl = new URL(downloadUrl);
+    const isHttps = parsedUrl.protocol === 'https:';
+    const httpModule = isHttps ? https : require('http');
+    
+    const fileName = download.filename;
+    const uploadDir = path.join(__dirname, 'public', 'uploads');
+    const filePath = path.join(uploadDir, 'downloads_' + fileName);
+    
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (isHttps ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      headers: {
+        'User-Agent': 'Cloud-Termux-Downloader/1.0'
+      }
+    };
+    
+    // Adicionar cabeçalho Range para resumir download
+    if (resumeFrom > 0) {
+      options.headers['Range'] = `bytes=${resumeFrom}-`;
+    }
+    
+    // Atualizar status para downloading
+    const updateStatus = db.prepare('UPDATE downloads SET status = ?, started_at = CURRENT_TIMESTAMP WHERE id = ?');
+    updateStatus.run('downloading', downloadId);
+    db.close();
+    
+    const request = httpModule.request(options, (response) => {
+      if (response.statusCode === 206 || response.statusCode === 200) {
+        const totalSize = parseInt(response.headers['content-length'] || '0') + resumeFrom;
+        let downloadedSize = resumeFrom;
+        let lastSpeedCheck = Date.now();
+        let lastDownloadedSize = resumeFrom;
+        
+        const fileStream = fs.createWriteStream(filePath, resumeFrom > 0 ? { flags: 'a' } : {});
+        
+        response.on('data', (chunk) => {
+          const info = activeDownloads.get(downloadId);
+          if (!info || info.cancelled || info.paused) {
+            fileStream.destroy();
+            request.destroy();
+            return;
+          }
+          
+          downloadedSize += chunk.length;
+          fileStream.write(chunk);
+          
+          // Calcular velocidade a cada segundo
+          const currentTime = Date.now();
+          if (currentTime - lastSpeedCheck > 1000) {
+            const timeDiff = (currentTime - lastSpeedCheck) / 1000;
+            const sizeDiff = downloadedSize - lastDownloadedSize;
+            const speed = sizeDiff / timeDiff; // bytes por segundo
+            
+            const progress = totalSize > 0 ? (downloadedSize / totalSize) * 100 : 0;
+            
+            // Atualizar banco de dados
+            try {
+              const db = new Database(DB_PATH);
+              const updateProgress = db.prepare('UPDATE downloads SET downloaded_size = ?, file_size = ?, progress = ?, download_speed = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
+              updateProgress.run(downloadedSize, totalSize, progress, speed, downloadId);
+              db.close();
+              
+              // Emitir evento via Socket.IO
+              io.emit('download_progress', {
+                downloadId,
+                downloadedSize,
+                totalSize,
+                progress,
+                speed
+              });
+            } catch (dbError) {
+              console.error('Erro ao atualizar progresso:', dbError);
+            }
+            
+            lastSpeedCheck = currentTime;
+            lastDownloadedSize = downloadedSize;
+          }
+        });
+        
+        response.on('end', () => {
+          fileStream.end();
+          
+          // Download concluído
+          try {
+            const db = new Database(DB_PATH);
+            const updateComplete = db.prepare('UPDATE downloads SET status = ?, progress = 100, file_path = ?, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
+            updateComplete.run('completed', filePath, downloadId);
+            db.close();
+            
+            activeDownloads.delete(downloadId);
+            
+            io.emit('download_completed', { downloadId });
+          } catch (error) {
+            console.error('Erro ao finalizar download:', error);
+          }
+        });
+        
+        response.on('error', (error) => {
+          fileStream.destroy();
+          handleDownloadError(downloadId, `Erro de resposta: ${error.message}`);
+        });
+        
+      } else {
+        handleDownloadError(downloadId, `Erro HTTP: ${response.statusCode}`);
+      }
+    });
+    
+    request.on('error', (error) => {
+      handleDownloadError(downloadId, `Erro de requisição: ${error.message}`);
+    });
+    
+    request.end();
+    
+  } catch (error) {
+    handleDownloadError(downloadId, `Erro geral: ${error.message}`);
+  }
+}
+
+function pauseDownload(downloadId) {
+  const downloadInfo = activeDownloads.get(downloadId);
+  if (downloadInfo) {
+    downloadInfo.paused = true;
+  }
+}
+
+function resumeDownload(downloadId, downloadUrl, resumeFrom) {
+  const downloadInfo = activeDownloads.get(downloadId);
+  if (downloadInfo) {
+    downloadInfo.paused = false;
+    performDownload(downloadId, downloadUrl, resumeFrom);
+  } else {
+    startDownload(downloadId, downloadUrl);
+  }
+}
+
+function cancelDownload(downloadId) {
+  const downloadInfo = activeDownloads.get(downloadId);
+  if (downloadInfo) {
+    downloadInfo.cancelled = true;
+    activeDownloads.delete(downloadId);
+  }
+}
+
+function handleDownloadError(downloadId, errorMessage) {
+  try {
+    const db = new Database(DB_PATH);
+    const updateError = db.prepare('UPDATE downloads SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
+    updateError.run('error', errorMessage, downloadId);
+    db.close();
+    
+    activeDownloads.delete(downloadId);
+    
+    io.emit('download_error', { downloadId, error: errorMessage });
+  } catch (error) {
+    console.error('Erro ao salvar erro de download:', error);
+  }
+}
 
 // Inicializar aplicação
 initDatabase();
