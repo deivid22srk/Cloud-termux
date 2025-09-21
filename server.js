@@ -28,16 +28,43 @@ app.use(helmet({
 app.use(compression());
 app.use(cors());
 
-// Configuração do Express
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Configuração do Express com otimizações para Termux
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static('public'));
+
+// Configurações de timeout otimizadas para Termux
+app.use((req, res, next) => {
+  // Timeout aumentado para uploads/downloads grandes
+  req.setTimeout(600000); // 10 minutos
+  res.setTimeout(600000);
+  
+  // Headers de performance
+  res.setHeader('X-Powered-By', 'Cloud-Termux');
+  res.setHeader('Keep-Alive', 'timeout=300, max=1000');
+  
+  next();
+});
 app.use(fileUpload({
   createParentPath: true,
-  limits: { fileSize: 10 * 1024 * 1024 * 1024 }, // 10GB limite (sem limite prático)
+  limits: { 
+    fileSize: 50 * 1024 * 1024 * 1024, // 50GB limite (sem limite prático)
+    files: 10, // Múltiplos arquivos simultâneos
+    parts: 1000,
+    fieldSize: 2 * 1024 * 1024 // 2MB para campos
+  },
   useTempFiles: true,
   tempFileDir: '/tmp/',
-  debug: false
+  uploadTimeout: 600000, // 10 minutos timeout
+  debug: false,
+  // Configurações otimizadas para Termux
+  parseNested: true,
+  preserveExtension: 4,
+  safeFileNames: true,
+  abortOnLimit: false,
+  responseOnLimit: 'Arquivo muito grande',
+  // Buffer otimizado para melhor throughput
+  highWaterMark: 2 * 1024 * 1024 // 2MB buffer
 }));
 
 // Sessões
@@ -595,6 +622,84 @@ app.delete('/api/downloads/:id', requireAuth, (req, res) => {
   }
 });
 
+// ROTA PARA DOWNLOAD DE ARQUIVOS OTIMIZADA PARA TERMUX
+app.get('/api/download/:id', requireAuth, (req, res) => {
+  const fileId = req.params.id;
+  
+  try {
+    const db = new Database(DB_PATH);
+    const file = db.prepare('SELECT * FROM files WHERE id = ? AND user_id = ?').get(fileId, req.session.user.id);
+    db.close();
+    
+    if (!file || file.mimetype === 'folder') {
+      return res.status(404).json({ error: 'Arquivo não encontrado' });
+    }
+    
+    if (!fs.existsSync(file.path)) {
+      return res.status(404).json({ error: 'Arquivo não encontrado no disco' });
+    }
+    
+    // Headers otimizados para performance no Termux
+    res.setHeader('Content-Disposition', `attachment; filename="${file.original_name}"`);
+    res.setHeader('Content-Type', file.mimetype || 'application/octet-stream');
+    res.setHeader('Content-Length', file.size);
+    
+    // Headers de cache para melhor performance
+    res.setHeader('Cache-Control', 'public, max-age=31536000'); // 1 ano
+    res.setHeader('Last-Modified', new Date(file.created_at).toUTCString());
+    
+    // Headers de compressão se suportado
+    res.setHeader('Accept-Ranges', 'bytes');
+    
+    // Configurações otimizadas para Termux
+    const streamOptions = {
+      highWaterMark: 1024 * 1024, // Buffer de 1MB para melhor throughput
+      autoClose: true,
+      emitClose: true
+    };
+    
+    // Suporte a Range requests para downloads resumíveis
+    const range = req.headers.range;
+    if (range) {
+      const parts = range.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : file.size - 1;
+      const chunksize = (end - start) + 1;
+      
+      res.status(206); // Partial Content
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${file.size}`);
+      res.setHeader('Content-Length', chunksize);
+      
+      streamOptions.start = start;
+      streamOptions.end = end;
+    }
+    
+    // Stream otimizado
+    const fileStream = fs.createReadStream(file.path, streamOptions);
+    
+    // Error handling
+    fileStream.on('error', (error) => {
+      console.error('Erro no stream de arquivo:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Erro ao ler arquivo' });
+      }
+    });
+    
+    // Pipeline otimizado para melhor performance
+    fileStream.pipe(res);
+    
+    res.on('close', () => {
+      fileStream.destroy();
+    });
+    
+  } catch (error) {
+    console.error('Erro ao fazer download:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Erro ao fazer download do arquivo' });
+    }
+  }
+});
+
 // CHAT COM SOCKET.IO
 app.get('/api/chat/messages', requireAuth, (req, res) => {
   try {
@@ -1023,6 +1128,16 @@ function handleDownloadError(downloadId, errorMessage) {
 
 // Inicializar aplicação
 initDatabase();
+
+// Configurações de performance para o servidor HTTP no Termux
+server.keepAliveTimeout = 300000; // 5 minutos
+server.headersTimeout = 310000; // Maior que keepAliveTimeout
+server.requestTimeout = 600000; // 10 minutos para uploads grandes
+server.timeout = 600000; // 10 minutos timeout geral
+server.maxConnections = 1000; // Conexões simultâneas
+
+// Configurações de buffer para melhor throughput
+server.maxHeaderSize = 16384; // 16KB para headers grandes
 
 server.listen(PORT, () => {
   console.log('='.repeat(50));
