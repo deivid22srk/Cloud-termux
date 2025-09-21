@@ -11,6 +11,8 @@ const compression = require('compression');
 const helmet = require('helmet');
 const cors = require('cors');
 const { execSync } = require('child_process');
+const https = require('https');
+const url = require('url');
 
 const app = express();
 const server = http.createServer(app);
@@ -186,7 +188,8 @@ class DataManager {
       contacts: [],
       calendar_events: [],
       notes: [],
-      chat_messages: []
+      chat_messages: [],
+      downloads: []
     };
     
     if (DB_TYPE === 'json') {
@@ -301,6 +304,26 @@ class DataManager {
           username TEXT NOT NULL,
           message TEXT NOT NULL,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(user_id) REFERENCES users(id)
+        )`);
+        
+        db.exec(`CREATE TABLE IF NOT EXISTS downloads (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER,
+          url TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          original_filename TEXT,
+          file_path TEXT,
+          file_size INTEGER DEFAULT 0,
+          downloaded_size INTEGER DEFAULT 0,
+          download_speed REAL DEFAULT 0,
+          status TEXT DEFAULT 'pending',
+          progress REAL DEFAULT 0,
+          error_message TEXT,
+          started_at DATETIME,
+          completed_at DATETIME,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY(user_id) REFERENCES users(id)
         )`);
         
@@ -553,6 +576,96 @@ class DataManager {
       return result.changes > 0;
     }
   }
+  
+  // === MÉTODOS PARA DOWNLOADS ===
+  getDownloads(userId) {
+    if (DB_TYPE === 'json') {
+      return this.data.downloads.filter(d => d.user_id === userId).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    } else if (DB_TYPE === 'better-sqlite3') {
+      return db.prepare('SELECT * FROM downloads WHERE user_id = ? ORDER BY created_at DESC').all(userId);
+    }
+    return [];
+  }
+  
+  getDownload(downloadId, userId) {
+    if (DB_TYPE === 'json') {
+      return this.data.downloads.find(d => d.id == downloadId && d.user_id == userId);
+    } else if (DB_TYPE === 'better-sqlite3') {
+      return db.prepare('SELECT * FROM downloads WHERE id = ? AND user_id = ?').get(downloadId, userId);
+    }
+    return null;
+  }
+  
+  addDownload(userId, url, filename, originalFilename) {
+    const downloadData = {
+      user_id: userId,
+      url: url,
+      filename: filename,
+      original_filename: originalFilename || filename,
+      file_path: null,
+      file_size: 0,
+      downloaded_size: 0,
+      download_speed: 0,
+      status: 'pending',
+      progress: 0,
+      error_message: null,
+      started_at: null,
+      completed_at: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+    
+    if (DB_TYPE === 'json') {
+      downloadData.id = this.data.downloads.length > 0 ? Math.max(...this.data.downloads.map(d => d.id)) + 1 : 1;
+      this.data.downloads.push(downloadData);
+      this.saveJsonData();
+      return { lastInsertRowid: downloadData.id };
+    } else if (DB_TYPE === 'better-sqlite3') {
+      const insert = db.prepare(`INSERT INTO downloads (user_id, url, filename, original_filename, status) VALUES (?, ?, ?, ?, 'pending')`);
+      return insert.run(userId, url, filename, originalFilename);
+    }
+  }
+  
+  updateDownload(downloadId, updates) {
+    if (DB_TYPE === 'json') {
+      const downloadIndex = this.data.downloads.findIndex(d => d.id == downloadId);
+      if (downloadIndex !== -1) {
+        this.data.downloads[downloadIndex] = {
+          ...this.data.downloads[downloadIndex],
+          ...updates,
+          updated_at: new Date().toISOString()
+        };
+        this.saveJsonData();
+        return true;
+      }
+      return false;
+    } else if (DB_TYPE === 'better-sqlite3') {
+      const fields = Object.keys(updates).map(key => `${key} = ?`).join(', ');
+      const values = Object.values(updates);
+      const query = `UPDATE downloads SET ${fields}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`;
+      const result = db.prepare(query).run(...values, downloadId);
+      return result.changes > 0;
+    }
+  }
+  
+  deleteDownload(downloadId, userId) {
+    if (DB_TYPE === 'json') {
+      const downloadIndex = this.data.downloads.findIndex(d => d.id == downloadId && d.user_id == userId);
+      if (downloadIndex !== -1) {
+        const download = this.data.downloads[downloadIndex];
+        this.data.downloads.splice(downloadIndex, 1);
+        this.saveJsonData();
+        return download;
+      }
+      return null;
+    } else if (DB_TYPE === 'better-sqlite3') {
+      const download = db.prepare('SELECT * FROM downloads WHERE id = ? AND user_id = ?').get(downloadId, userId);
+      if (download) {
+        db.prepare('DELETE FROM downloads WHERE id = ?').run(downloadId);
+      }
+      return download;
+    }
+  }
 }
 
 // Inicializar sistema
@@ -572,7 +685,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public'));
 app.use(fileUpload({
   createParentPath: true,
-  limits: { fileSize: 50 * 1024 * 1024 },
+  limits: { fileSize: 10 * 1024 * 1024 * 1024 }, // 10GB limite (sem limite prático)
   useTempFiles: true,
   tempFileDir: path.join(__dirname, 'temp'), // Usar pasta local ao invés de /tmp/
   debug: false
@@ -662,25 +775,69 @@ app.post('/api/upload', requireAuth, (req, res) => {
   const folderPath = folder ? path.join(baseUploadPath, folder) : baseUploadPath;
   const uploadPath = path.join(folderPath, fileName);
   
+  const uploadStartTime = Date.now();
+  const uploadId = 'upload_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+  
+  // Emitir evento de início de upload
+  io.emit('upload_started', {
+    uploadId,
+    fileName: file.name,
+    fileSize: file.size,
+    userId: req.session.user.id
+  });
+  
   // Criar pasta se não existir
   try {
     if (!fs.existsSync(folderPath)) {
       fs.mkdirSync(folderPath, { recursive: true });
     }
   } catch (error) {
+    io.emit('upload_error', {
+      uploadId,
+      error: 'Erro ao criar pasta de destino: ' + error.message
+    });
     return res.status(500).json({ error: 'Erro ao criar pasta de destino: ' + error.message });
   }
   
   file.mv(uploadPath, (err) => {
+    const uploadEndTime = Date.now();
+    const uploadDuration = (uploadEndTime - uploadStartTime) / 1000; // em segundos
+    const uploadSpeed = file.size / uploadDuration; // bytes por segundo
+    
     if (err) {
+      io.emit('upload_error', {
+        uploadId,
+        error: 'Erro ao salvar arquivo: ' + err.message
+      });
       return res.status(500).json({ error: 'Erro ao salvar arquivo: ' + err.message });
     }
     
     try {
       const result = dataManager.addFile(req.session.user.id, fileName, file.name, file.size, file.mimetype, uploadPath, folder);
-      res.json({ success: true, fileId: result.lastInsertRowid, fileName: file.name });
+      
+      // Emitir evento de conclusão de upload com velocidade
+      io.emit('upload_completed', {
+        uploadId,
+        fileName: file.name,
+        fileSize: file.size,
+        uploadSpeed,
+        duration: uploadDuration,
+        userId: req.session.user.id
+      });
+      
+      res.json({ 
+        success: true, 
+        fileId: result.lastInsertRowid, 
+        fileName: file.name, 
+        uploadSpeed: uploadSpeed,
+        duration: uploadDuration
+      });
     } catch (error) {
       console.error('Erro ao salvar arquivo:', error);
+      io.emit('upload_error', {
+        uploadId,
+        error: 'Erro ao salvar informações do arquivo'
+      });
       res.status(500).json({ error: 'Erro ao salvar informações do arquivo' });
     }
   });
@@ -719,6 +876,114 @@ app.delete('/api/files/:id', requireAuth, (req, res) => {
   } catch (error) {
     console.error('Erro ao deletar arquivo:', error);
     res.status(500).json({ error: 'Erro ao deletar arquivo' });
+  }
+});
+
+// ROTAS DE DOWNLOADS
+app.get('/api/downloads', requireAuth, (req, res) => {
+  try {
+    const downloads = dataManager.getDownloads(req.session.user.id);
+    res.json(downloads);
+  } catch (error) {
+    console.error('Erro ao buscar downloads:', error);
+    res.status(500).json({ error: 'Erro ao buscar downloads' });
+  }
+});
+
+app.post('/api/downloads', requireAuth, (req, res) => {
+  const { url } = req.body;
+  
+  if (!url) {
+    return res.status(400).json({ error: 'URL é obrigatória' });
+  }
+  
+  try {
+    // Extrair nome do arquivo da URL
+    let filename = path.basename(new URL(url).pathname);
+    if (!filename || filename === '/') {
+      filename = 'download_' + Date.now();
+    }
+    
+    const result = dataManager.addDownload(req.session.user.id, url, filename, filename);
+    
+    // Iniciar download
+    startDownload(result.lastInsertRowid, url);
+    
+    res.json({ success: true, downloadId: result.lastInsertRowid });
+  } catch (error) {
+    console.error('Erro ao criar download:', error);
+    res.status(500).json({ error: 'Erro ao criar download' });
+  }
+});
+
+app.post('/api/downloads/:id/pause', requireAuth, (req, res) => {
+  const downloadId = req.params.id;
+  
+  try {
+    const download = dataManager.getDownload(downloadId, req.session.user.id);
+    
+    if (!download) {
+      return res.status(404).json({ error: 'Download não encontrado' });
+    }
+    
+    // Atualizar status
+    dataManager.updateDownload(downloadId, { status: 'paused' });
+    
+    // Pausar download
+    pauseDownload(downloadId);
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Erro ao pausar download:', error);
+    res.status(500).json({ error: 'Erro ao pausar download' });
+  }
+});
+
+app.post('/api/downloads/:id/resume', requireAuth, (req, res) => {
+  const downloadId = req.params.id;
+  
+  try {
+    const download = dataManager.getDownload(downloadId, req.session.user.id);
+    
+    if (!download) {
+      return res.status(404).json({ error: 'Download não encontrado' });
+    }
+    
+    // Atualizar status
+    dataManager.updateDownload(downloadId, { status: 'downloading' });
+    
+    // Resumir download
+    resumeDownload(downloadId, download.url, download.downloaded_size || 0);
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Erro ao resumir download:', error);
+    res.status(500).json({ error: 'Erro ao resumir download' });
+  }
+});
+
+app.delete('/api/downloads/:id', requireAuth, (req, res) => {
+  const downloadId = req.params.id;
+  
+  try {
+    const download = dataManager.deleteDownload(downloadId, req.session.user.id);
+    
+    if (!download) {
+      return res.status(404).json({ error: 'Download não encontrado' });
+    }
+    
+    // Cancelar download se estiver ativo
+    cancelDownload(downloadId);
+    
+    // Deletar arquivo se existir
+    if (download.file_path && fs.existsSync(download.file_path)) {
+      fs.unlinkSync(download.file_path);
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Erro ao cancelar download:', error);
+    res.status(500).json({ error: 'Erro ao cancelar download' });
   }
 });
 
@@ -954,6 +1219,16 @@ io.on('connection', (socket) => {
     }
   });
   
+  // Eventos de upload em tempo real
+  socket.on('upload_progress', (data) => {
+    if (socket.userData) {
+      socket.broadcast.emit('upload_progress', {
+        ...data,
+        userId: socket.userData.id
+      });
+    }
+  });
+  
   socket.on('disconnect', () => {
     console.log('Usuário desconectado:', socket.id);
   });
@@ -966,6 +1241,218 @@ function formatFileSize(bytes) {
   const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// === GERENCIAMENTO DE DOWNLOADS ===
+const activeDownloads = new Map();
+
+function startDownload(downloadId, downloadUrl) {
+  if (activeDownloads.has(downloadId)) {
+    return; // Download já está ativo
+  }
+  
+  // Obter informações do download para ter o userId
+  const download = dataManager.data.downloads ? dataManager.data.downloads.find(d => d.id == downloadId) : null;
+  if (!download && DB_TYPE === 'better-sqlite3') {
+    download = db.prepare('SELECT * FROM downloads WHERE id = ?').get(downloadId);
+  }
+  
+  if (!download) {
+    console.error('Download não encontrado:', downloadId);
+    return;
+  }
+  
+  const downloadInfo = {
+    id: downloadId,
+    url: downloadUrl,
+    userId: download.user_id,
+    startTime: Date.now(),
+    paused: false,
+    cancelled: false
+  };
+  
+  activeDownloads.set(downloadId, downloadInfo);
+  
+  performDownload(downloadId, downloadUrl, 0);
+}
+
+function performDownload(downloadId, downloadUrl, resumeFrom = 0) {
+  const downloadInfo = activeDownloads.get(downloadId);
+  if (!downloadInfo || downloadInfo.cancelled) return;
+  
+  try {
+    const download = dataManager.getDownload(downloadId, downloadInfo.userId);
+    
+    if (!download) {
+      return;
+    }
+    
+    const parsedUrl = new URL(downloadUrl);
+    const isHttps = parsedUrl.protocol === 'https:';
+    const httpModule = isHttps ? https : require('http');
+    
+    const fileName = download.filename;
+    const baseUploadPath = STORAGE_CONFIG.externalStorage ? STORAGE_CONFIG.externalPath : STORAGE_CONFIG.uploadsPath;
+    const filePath = path.join(baseUploadPath, 'downloads_' + fileName);
+    
+    if (!fs.existsSync(baseUploadPath)) {
+      fs.mkdirSync(baseUploadPath, { recursive: true });
+    }
+    
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (isHttps ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      headers: {
+        'User-Agent': 'Cloud-Termux-Downloader/1.0'
+      }
+    };
+    
+    // Adicionar cabeçalho Range para resumir download
+    if (resumeFrom > 0) {
+      options.headers['Range'] = `bytes=${resumeFrom}-`;
+    }
+    
+    // Atualizar status para downloading
+    dataManager.updateDownload(downloadId, { 
+      status: 'downloading', 
+      started_at: new Date().toISOString() 
+    });
+    
+    const request = httpModule.request(options, (response) => {
+      if (response.statusCode === 206 || response.statusCode === 200) {
+        const totalSize = parseInt(response.headers['content-length'] || '0') + resumeFrom;
+        let downloadedSize = resumeFrom;
+        let lastSpeedCheck = Date.now();
+        let lastDownloadedSize = resumeFrom;
+        
+        const fileStream = fs.createWriteStream(filePath, resumeFrom > 0 ? { flags: 'a' } : {});
+        
+        response.on('data', (chunk) => {
+          const info = activeDownloads.get(downloadId);
+          if (!info || info.cancelled || info.paused) {
+            fileStream.destroy();
+            request.destroy();
+            return;
+          }
+          
+          downloadedSize += chunk.length;
+          fileStream.write(chunk);
+          
+          // Calcular velocidade a cada segundo
+          const currentTime = Date.now();
+          if (currentTime - lastSpeedCheck > 1000) {
+            const timeDiff = (currentTime - lastSpeedCheck) / 1000;
+            const sizeDiff = downloadedSize - lastDownloadedSize;
+            const speed = sizeDiff / timeDiff; // bytes por segundo
+            
+            const progress = totalSize > 0 ? (downloadedSize / totalSize) * 100 : 0;
+            
+            // Atualizar banco de dados
+            try {
+              dataManager.updateDownload(downloadId, {
+                downloaded_size: downloadedSize,
+                file_size: totalSize,
+                progress: progress,
+                download_speed: speed
+              });
+              
+              // Emitir evento via Socket.IO
+              io.emit('download_progress', {
+                downloadId,
+                downloadedSize,
+                totalSize,
+                progress,
+                speed
+              });
+            } catch (dbError) {
+              console.error('Erro ao atualizar progresso:', dbError);
+            }
+            
+            lastSpeedCheck = currentTime;
+            lastDownloadedSize = downloadedSize;
+          }
+        });
+        
+        response.on('end', () => {
+          fileStream.end();
+          
+          // Download concluído
+          try {
+            dataManager.updateDownload(downloadId, {
+              status: 'completed',
+              progress: 100,
+              file_path: filePath,
+              completed_at: new Date().toISOString()
+            });
+            
+            activeDownloads.delete(downloadId);
+            
+            io.emit('download_completed', { downloadId });
+          } catch (error) {
+            console.error('Erro ao finalizar download:', error);
+          }
+        });
+        
+        response.on('error', (error) => {
+          fileStream.destroy();
+          handleDownloadError(downloadId, `Erro de resposta: ${error.message}`);
+        });
+        
+      } else {
+        handleDownloadError(downloadId, `Erro HTTP: ${response.statusCode}`);
+      }
+    });
+    
+    request.on('error', (error) => {
+      handleDownloadError(downloadId, `Erro de requisição: ${error.message}`);
+    });
+    
+    request.end();
+    
+  } catch (error) {
+    handleDownloadError(downloadId, `Erro geral: ${error.message}`);
+  }
+}
+
+function pauseDownload(downloadId) {
+  const downloadInfo = activeDownloads.get(downloadId);
+  if (downloadInfo) {
+    downloadInfo.paused = true;
+  }
+}
+
+function resumeDownload(downloadId, downloadUrl, resumeFrom) {
+  const downloadInfo = activeDownloads.get(downloadId);
+  if (downloadInfo) {
+    downloadInfo.paused = false;
+    performDownload(downloadId, downloadUrl, resumeFrom);
+  } else {
+    startDownload(downloadId, downloadUrl);
+  }
+}
+
+function cancelDownload(downloadId) {
+  const downloadInfo = activeDownloads.get(downloadId);
+  if (downloadInfo) {
+    downloadInfo.cancelled = true;
+    activeDownloads.delete(downloadId);
+  }
+}
+
+function handleDownloadError(downloadId, errorMessage) {
+  try {
+    dataManager.updateDownload(downloadId, {
+      status: 'error',
+      error_message: errorMessage
+    });
+    
+    activeDownloads.delete(downloadId);
+    
+    io.emit('download_error', { downloadId, error: errorMessage });
+  } catch (error) {
+    console.error('Erro ao salvar erro de download:', error);
+  }
 }
 
 // Inicializar aplicação
