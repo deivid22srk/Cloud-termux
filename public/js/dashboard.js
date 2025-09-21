@@ -9,7 +9,38 @@ let notes = [];
 // Inicialização
 document.addEventListener('DOMContentLoaded', function() {
     initializeApp();
+    initializeMobileMenu();
 });
+
+// Menu Mobile
+function initializeMobileMenu() {
+    const mobileMenuBtn = document.getElementById('mobileMenuBtn');
+    const sidebar = document.getElementById('sidebar');
+    const sidebarOverlay = document.getElementById('sidebarOverlay');
+    
+    if (mobileMenuBtn && sidebar && sidebarOverlay) {
+        mobileMenuBtn.addEventListener('click', function() {
+            sidebar.classList.toggle('active');
+            sidebarOverlay.classList.toggle('active');
+        });
+        
+        sidebarOverlay.addEventListener('click', function() {
+            sidebar.classList.remove('active');
+            sidebarOverlay.classList.remove('active');
+        });
+        
+        // Fechar menu ao clicar em link (mobile)
+        const navLinks = document.querySelectorAll('.nav-link');
+        navLinks.forEach(link => {
+            link.addEventListener('click', function() {
+                if (window.innerWidth <= 768) {
+                    sidebar.classList.remove('active');
+                    sidebarOverlay.classList.remove('active');
+                }
+            });
+        });
+    }
+}
 
 async function initializeApp() {
     // Carregar informações do usuário
@@ -79,6 +110,12 @@ function setupNavigation() {
             // Atualizar navegação ativa
             navLinks.forEach(l => l.classList.remove('active'));
             link.classList.add('active');
+            
+            // Fechar menu mobile se estiver aberto
+            if (window.innerWidth <= 768) {
+                document.getElementById('sidebar').classList.remove('active');
+                document.getElementById('sidebarOverlay').classList.remove('active');
+            }
         });
     });
 }

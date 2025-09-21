@@ -25,6 +25,16 @@ let db = null;
 function initDatabaseSystem() {
   console.log('🔍 Detectando sistema de banco de dados disponível...');
   
+  // Criar diretórios necessários
+  const dirs = ['database', 'temp', path.join('public', 'uploads')];
+  dirs.forEach(dir => {
+    const dirPath = path.join(__dirname, dir);
+    if (!fs.existsSync(dirPath)) {
+      fs.mkdirSync(dirPath, { recursive: true });
+      console.log(`📁 Diretório criado: ${dir}`);
+    }
+  });
+  
   // Tentar better-sqlite3 primeiro
   try {
     const Database = require('better-sqlite3');
@@ -54,6 +64,7 @@ function initDatabaseSystem() {
   
   // Usar JSON como fallback
   console.log('📁 Usando armazenamento JSON como fallback');
+  console.log('✅ Modo totalmente compatível - sem dependências de compilação');
   DB_TYPE = 'json';
   return true;
 }
@@ -417,7 +428,7 @@ app.use(fileUpload({
   createParentPath: true,
   limits: { fileSize: 50 * 1024 * 1024 },
   useTempFiles: true,
-  tempFileDir: '/tmp/',
+  tempFileDir: path.join(__dirname, 'temp'), // Usar pasta local ao invés de /tmp/
   debug: false
 }));
 
