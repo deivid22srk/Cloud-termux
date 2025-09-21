@@ -700,6 +700,53 @@
                 font-size: 2.5rem !important;
                 margin-bottom: 12px;
             }
+            
+            /* New styles for enhanced features */
+            .btn-download {
+                background: linear-gradient(135deg, #38a169, #2f855a);
+                padding: 6px 12px;
+                font-size: 0.8rem;
+                margin-left: 5px;
+            }
+            
+            .btn-folder {
+                background: linear-gradient(135deg, #f6ad55, #ed8936);
+                padding: 6px 12px;
+                font-size: 0.8rem;
+                margin-left: 5px;
+            }
+            
+            .storage-info {
+                background: #f8f9fa;
+                padding: 15px;
+                border-radius: 8px;
+                margin-bottom: 15px;
+                border-left: 4px solid #667eea;
+            }
+            
+            .storage-bar {
+                width: 100%;
+                height: 20px;
+                background: #e2e8f0;
+                border-radius: 10px;
+                overflow: hidden;
+                margin-top: 10px;
+            }
+            
+            .storage-used {
+                height: 100%;
+                background: linear-gradient(135deg, #667eea, #764ba2);
+                transition: width 0.3s ease;
+            }
+            
+            .folder-item {
+                background: #fff8e1;
+                border-left: 4px solid #ffa000;
+            }
+            
+            .file-item {
+                background: white;
+            }
         }
     </style>
 </head>
@@ -762,6 +809,12 @@
                     <a href="#" class="nav-link" data-module="chat">
                         <i class="fas fa-comments"></i>
                         Chat
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#" class="nav-link" data-module="settings">
+                        <i class="fas fa-cog"></i>
+                        Configurações
                     </a>
                 </li>
             </ul>
@@ -834,7 +887,25 @@
                 </div>
 
                 <div class="card">
-                    <h3>Meus Arquivos</h3>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                        <h3>Meus Arquivos</h3>
+                        <div>
+                            <button class="btn" onclick="showModal('folderModal')" style="padding: 8px 16px; margin-right: 10px;">
+                                <i class="fas fa-folder-plus"></i> Nova Pasta
+                            </button>
+                            <div id="storageDisplay" style="font-size: 0.9rem; color: #666; margin-top: 5px;">
+                                Carregando...
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Navegação de pastas -->
+                    <div id="folderNavigation" style="margin-bottom: 15px; display: none;">
+                        <nav style="background: #f8f9fa; padding: 10px; border-radius: 6px; font-size: 0.9rem;">
+                            <span id="currentPath">📁 Pasta atual: /</span>
+                        </nav>
+                    </div>
+                    
                     <div id="filesList">
                         <p>Carregando arquivos...</p>
                     </div>
@@ -922,6 +993,42 @@
                             </button>
                         </div>
                     </div>
+                </div>
+            </div>
+            <!-- Settings Module -->
+            <div id="settings" class="module">
+                <div class="module-header">
+                    <h2 class="module-title">
+                        <i class="fas fa-cog"></i>
+                        Configurações
+                    </h2>
+                </div>
+
+                <div class="card">
+                    <h3><i class="fas fa-hdd"></i> Armazenamento</h3>
+                    <div id="storageInfo" style="margin-bottom: 20px;">
+                        <p>Carregando informações de armazenamento...</p>
+                    </div>
+                    
+                    <form id="storageConfigForm">
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="useExternalStorage"> Usar armazenamento externo
+                            </label>
+                        </div>
+                        <div class="form-group" id="externalPathGroup" style="display: none;">
+                            <label for="externalPath">Caminho do armazenamento externo:</label>
+                            <input type="text" id="externalPath" placeholder="/storage/3B07-4AB2/" 
+                                   title="Exemplo: /storage/3B07-4AB2/ para cartão SD">
+                            <small style="color: #666; font-size: 0.85rem; display: block; margin-top: 5px;">
+                                Exemplo para cartão SD: <code>/storage/3B07-4AB2/</code><br>
+                                Para Termux: <code>/data/data/com.termux/files/home/storage/shared/</code>
+                            </small>
+                        </div>
+                        <button type="submit" class="btn">
+                            <i class="fas fa-save"></i> Salvar Configurações
+                        </button>
+                    </form>
                 </div>
             </div>
         </main>
@@ -1013,6 +1120,25 @@
                     <input type="text" id="noteTags" placeholder="trabalho, pessoal, importante">
                 </div>
                 <button type="submit" class="btn">Salvar Nota</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Folder Modal -->
+    <div id="folderModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Nova Pasta</h3>
+                <span class="close" onclick="hideModal('folderModal')">&times;</span>
+            </div>
+            <form id="folderForm">
+                <div class="form-group">
+                    <label for="folderName">Nome da Pasta</label>
+                    <input type="text" id="folderName" required placeholder="Ex: Documentos, Fotos, etc.">
+                </div>
+                <button type="submit" class="btn">
+                    <i class="fas fa-folder-plus"></i> Criar Pasta
+                </button>
             </form>
         </div>
     </div>

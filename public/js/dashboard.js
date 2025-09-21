@@ -2,9 +2,13 @@
 let currentUser = null;
 let socket = null;
 let files = [];
+let folders = [];
 let contacts = [];
 let events = [];
 let notes = [];
+let currentFolder = '';
+let storageConfig = {};
+let storageInfo = {};
 
 // Inicialização
 document.addEventListener('DOMContentLoaded', function() {
@@ -71,6 +75,12 @@ async function initializeApp() {
 
     // Configurar formulários
     setupForms();
+    
+    // Configurar formulário de pastas
+    setupFolderForm();
+    
+    // Configurar configurações de storage
+    setupStorageSettings();
 
     // Carregar dados iniciais
     await loadAllData();
@@ -135,7 +145,8 @@ function showModule(moduleName) {
         contacts: 'Contatos',
         calendar: 'Calendário',
         notes: 'Notas',
-        chat: 'Chat'
+        chat: 'Chat',
+        settings: 'Configurações'
     };
     document.getElementById('currentModuleTitle').textContent = titles[moduleName];
 
@@ -156,6 +167,10 @@ function showModule(moduleName) {
         case 'chat':
             loadChatMessages();
             break;
+        case 'settings':
+            loadStorageInfo();
+            loadStorageConfig();
+            break;
     }
 }
 
@@ -165,7 +180,9 @@ async function loadAllData() {
         loadContacts(),
         loadEvents(),
         loadNotes(),
-        loadChatMessages()
+        loadChatMessages(),
+        loadStorageInfo(),
+        loadStorageConfig()
     ]);
     updateDashboardStats();
 }
@@ -175,6 +192,9 @@ function updateDashboardStats() {
     document.getElementById('contactsCount').textContent = contacts.length;
     document.getElementById('eventsCount').textContent = events.length;
     document.getElementById('notesCount').textContent = notes.length;
+    
+    // Atualizar display de storage em arquivos
+    updateStorageDisplay();
 }
 
 // === GERENCIAMENTO DE ARQUIVOS ===
@@ -214,6 +234,7 @@ function handleFiles(files) {
 async function uploadFile(file) {
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('folder', currentFolder); // Incluir pasta atual
 
     const progressBar = document.getElementById('progressBar');
     const uploadStatus = document.getElementById('uploadStatus');
@@ -240,7 +261,8 @@ async function uploadFile(file) {
                     uploadProgress.style.display = 'none';
                     progressBar.style.width = '0%';
                 }, 2000);
-                loadFiles();
+                loadFiles(currentFolder);
+                loadStorageInfo(); // Atualizar info de storage
             } else {
                 uploadStatus.textContent = 'Erro ao enviar arquivo.';
             }
@@ -259,11 +281,73 @@ async function uploadFile(file) {
     }
 }
 
-async function loadFiles() {
+// NAVEGAÇÃO DE PASTAS
+function navigateToFolder(folderName) {
+    loadFiles(folderName);
+}
+
+function updateFolderNavigation() {
+    const navigation = document.getElementById('folderNavigation');
+    const currentPath = document.getElementById('currentPath');
+    
+    if (currentFolder === '') {
+        navigation.style.display = 'none';
+    } else {
+        navigation.style.display = 'block';
+        currentPath.innerHTML = `📁 Pasta atual: /${currentFolder}`;
+    }
+}
+
+// DOWNLOAD DE ARQUIVOS
+function downloadFile(fileId) {
+    window.open(`/api/download/${fileId}`, '_blank');
+}
+
+// CRIAR PASTAS
+function setupFolderForm() {
+    document.getElementById('folderForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const folderName = document.getElementById('folderName').value.trim();
+        
+        if (!folderName) {
+            alert('Nome da pasta é obrigatório');
+            return;
+        }
+        
+        try {
+            const response = await fetch('/api/folders', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    name: folderName,
+                    parentFolder: currentFolder 
+                })
+            });
+
+            if (response.ok) {
+                hideModal('folderModal');
+                document.getElementById('folderForm').reset();
+                loadFiles(currentFolder);
+            } else {
+                const error = await response.json();
+                alert(error.error || 'Erro ao criar pasta');
+            }
+        } catch (error) {
+            console.error('Erro ao criar pasta:', error);
+            alert('Erro ao criar pasta');
+        }
+    });
+}
+
+async function loadFiles(folder = '') {
     try {
-        const response = await fetch('/api/files');
+        const response = await fetch(`/api/files?folder=${encodeURIComponent(folder)}`);
         if (response.ok) {
-            files = await response.json();
+            const data = await response.json();
+            files = data.files || [];
+            folders = data.folders || [];
+            currentFolder = folder;
             displayFiles();
         }
     } catch (error) {
@@ -274,14 +358,18 @@ async function loadFiles() {
 function displayFiles() {
     const filesList = document.getElementById('filesList');
     
-    if (files.length === 0) {
-        filesList.innerHTML = '<p>Nenhum arquivo encontrado. Faça upload do primeiro arquivo!</p>';
+    // Atualizar navegação de pastas
+    updateFolderNavigation();
+    
+    if (files.length === 0 && folders.length === 0) {
+        filesList.innerHTML = '<p>Nenhum arquivo ou pasta encontrado. Faça upload do primeiro arquivo ou crie uma pasta!</p>';
         return;
     }
 
     const table = document.createElement('table');
     table.className = 'table';
-    table.innerHTML = `
+    
+    let tableContent = `
         <thead>
             <tr>
                 <th>Nome</th>
@@ -290,24 +378,62 @@ function displayFiles() {
                 <th>Ações</th>
             </tr>
         </thead>
-        <tbody>
-            ${files.map(file => `
-                <tr>
-                    <td>
-                        <i class="fas fa-file"></i>
-                        ${file.original_name}
-                    </td>
-                    <td>${formatFileSize(file.size)}</td>
-                    <td>${new Date(file.created_at).toLocaleDateString()}</td>
-                    <td>
-                        <button class="btn btn-danger" onclick="deleteFile(${file.id})" style="padding: 6px 12px; font-size: 0.8rem;">
-                            <i class="fas fa-trash"></i>
-                        </button>
-                    </td>
-                </tr>
-            `).join('')}
-        </tbody>
-    `;
+        <tbody>`;
+    
+    // Mostrar botão voltar se não estiver na raiz
+    if (currentFolder !== '') {
+        tableContent += `
+            <tr class="folder-item">
+                <td onclick="navigateToFolder('')" style="cursor: pointer;">
+                    <i class="fas fa-arrow-left"></i> ..
+                </td>
+                <td>-</td>
+                <td>-</td>
+                <td>-</td>
+            </tr>`;
+    }
+    
+    // Mostrar pastas
+    folders.forEach(folder => {
+        tableContent += `
+            <tr class="folder-item">
+                <td onclick="navigateToFolder('${folder.original_name}')" style="cursor: pointer;">
+                    <i class="fas fa-folder" style="color: #ffa000;"></i>
+                    ${folder.original_name}
+                </td>
+                <td>-</td>
+                <td>${new Date(folder.created_at).toLocaleDateString()}</td>
+                <td>
+                    <button class="btn btn-danger" onclick="deleteFile(${folder.id})" style="padding: 6px 12px; font-size: 0.8rem;">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </td>
+            </tr>`;
+    });
+    
+    // Mostrar arquivos
+    files.forEach(file => {
+        tableContent += `
+            <tr class="file-item">
+                <td>
+                    <i class="fas fa-file"></i>
+                    ${file.original_name}
+                </td>
+                <td>${formatFileSize(file.size)}</td>
+                <td>${new Date(file.created_at).toLocaleDateString()}</td>
+                <td>
+                    <button class="btn btn-download" onclick="downloadFile(${file.id})">
+                        <i class="fas fa-download"></i>
+                    </button>
+                    <button class="btn btn-danger" onclick="deleteFile(${file.id})" style="padding: 6px 12px; font-size: 0.8rem;">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </td>
+            </tr>`;
+    });
+    
+    tableContent += '</tbody>';
+    table.innerHTML = tableContent;
     
     filesList.innerHTML = '';
     filesList.appendChild(table);
@@ -322,7 +448,7 @@ function formatFileSize(bytes) {
 }
 
 async function deleteFile(fileId) {
-    if (!confirm('Tem certeza que deseja excluir este arquivo?')) return;
+    if (!confirm('Tem certeza que deseja excluir este item?')) return;
 
     try {
         const response = await fetch(`/api/files/${fileId}`, {
@@ -330,14 +456,15 @@ async function deleteFile(fileId) {
         });
 
         if (response.ok) {
-            loadFiles();
+            loadFiles(currentFolder);
             updateDashboardStats();
+            loadStorageInfo(); // Atualizar info de storage
         } else {
-            alert('Erro ao excluir arquivo');
+            alert('Erro ao excluir item');
         }
     } catch (error) {
-        console.error('Erro ao excluir arquivo:', error);
-        alert('Erro ao excluir arquivo');
+        console.error('Erro ao excluir item:', error);
+        alert('Erro ao excluir item');
     }
 }
 
@@ -670,6 +797,203 @@ function setupForms() {
     });
 }
 
+// === GERENCIAMENTO DE STORAGE ===
+async function loadStorageInfo() {
+    try {
+        const response = await fetch('/api/storage/info');
+        if (response.ok) {
+            storageInfo = await response.json();
+            displayStorageInfo();
+            updateStorageDisplay();
+        }
+    } catch (error) {
+        console.error('Erro ao carregar informações de storage:', error);
+    }
+}
+
+async function loadStorageConfig() {
+    try {
+        const response = await fetch('/api/storage/config');
+        if (response.ok) {
+            storageConfig = await response.json();
+            displayStorageConfig();
+        }
+    } catch (error) {
+        console.error('Erro ao carregar configurações de storage:', error);
+    }
+}
+
+function displayStorageInfo() {
+    const storageInfoDiv = document.getElementById('storageInfo');
+    
+    if (!storageInfo.free) {
+        storageInfoDiv.innerHTML = '<p>Informações de armazenamento não disponíveis</p>';
+        return;
+    }
+    
+    const usedPercentage = storageInfo.percentage ? parseInt(storageInfo.percentage.replace('%', '')) : 0;
+    
+    storageInfoDiv.innerHTML = `
+        <div class="storage-info">
+            <h4><i class="fas fa-hdd"></i> Informações de Armazenamento</h4>
+            <p><strong>Localização:</strong> ${storageInfo.path}</p>
+            <p><strong>Tipo:</strong> ${storageInfo.external ? 'Armazenamento Externo' : 'Armazenamento Interno'}</p>
+            <div style="display: flex; justify-content: space-between; margin-top: 10px;">
+                <span><strong>Livre:</strong> ${storageInfo.free}</span>
+                <span><strong>Total:</strong> ${storageInfo.total || 'N/A'}</span>
+                <span><strong>Usado:</strong> ${storageInfo.used || 'N/A'}</span>
+            </div>
+            ${storageInfo.percentage ? `
+                <div class="storage-bar">
+                    <div class="storage-used" style="width: ${usedPercentage}%"></div>
+                </div>
+                <p style="text-align: center; margin-top: 5px; font-size: 0.9rem;">${storageInfo.percentage} usado</p>
+            ` : ''}
+        </div>
+    `;
+}
+
+function updateStorageDisplay() {
+    const storageDisplay = document.getElementById('storageDisplay');
+    if (storageInfo.free) {
+        storageDisplay.innerHTML = `💾 Livre: ${storageInfo.free} | Tipo: ${storageInfo.external ? 'Externo' : 'Interno'}`;
+    } else {
+        storageDisplay.innerHTML = 'Informações não disponíveis';
+    }
+}
+
+function displayStorageConfig() {
+    const useExternalCheckbox = document.getElementById('useExternalStorage');
+    const externalPathInput = document.getElementById('externalPath');
+    const externalPathGroup = document.getElementById('externalPathGroup');
+    
+    if (useExternalCheckbox && externalPathInput) {
+        useExternalCheckbox.checked = storageConfig.externalStorage || false;
+        externalPathInput.value = storageConfig.externalPath || '';
+        
+        if (useExternalCheckbox.checked) {
+            externalPathGroup.style.display = 'block';
+        } else {
+            externalPathGroup.style.display = 'none';
+        }
+    }
+}
+
+function setupStorageSettings() {
+    const useExternalCheckbox = document.getElementById('useExternalStorage');
+    const externalPathGroup = document.getElementById('externalPathGroup');
+    
+    if (useExternalCheckbox) {
+        useExternalCheckbox.addEventListener('change', function() {
+            if (this.checked) {
+                externalPathGroup.style.display = 'block';
+            } else {
+                externalPathGroup.style.display = 'none';
+            }
+        });
+    }
+    
+    const storageConfigForm = document.getElementById('storageConfigForm');
+    if (storageConfigForm) {
+        storageConfigForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const externalStorage = document.getElementById('useExternalStorage').checked;
+            const externalPath = document.getElementById('externalPath').value.trim();
+            
+            if (externalStorage && !externalPath) {
+                alert('Por favor, especifique o caminho do armazenamento externo');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/storage/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        externalStorage: externalStorage,
+                        externalPath: externalPath
+                    })
+                });
+
+                if (response.ok) {
+                    alert('Configurações salvas com sucesso! Reinicie o servidor para aplicar as mudanças.');
+                    loadStorageInfo();
+                    loadStorageConfig();
+                } else {
+                    const error = await response.json();
+                    alert(error.error || 'Erro ao salvar configurações');
+                }
+            } catch (error) {
+                console.error('Erro ao salvar configurações:', error);
+                alert('Erro ao salvar configurações');
+            }
+        });
+    }
+}
+
+// NAVEGAÇÃO DE PASTAS
+function navigateToFolder(folderName) {
+    loadFiles(folderName);
+}
+
+function updateFolderNavigation() {
+    const navigation = document.getElementById('folderNavigation');
+    const currentPath = document.getElementById('currentPath');
+    
+    if (currentFolder === '') {
+        navigation.style.display = 'none';
+    } else {
+        navigation.style.display = 'block';
+        currentPath.innerHTML = `📁 Pasta atual: /${currentFolder}`;
+    }
+}
+
+// DOWNLOAD DE ARQUIVOS
+function downloadFile(fileId) {
+    window.open(`/api/download/${fileId}`, '_blank');
+}
+
+// CRIAR PASTAS
+function setupFolderForm() {
+    const folderForm = document.getElementById('folderForm');
+    if (folderForm) {
+        folderForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const folderName = document.getElementById('folderName').value.trim();
+            
+            if (!folderName) {
+                alert('Nome da pasta é obrigatório');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/folders', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        name: folderName,
+                        parentFolder: currentFolder 
+                    })
+                });
+
+                if (response.ok) {
+                    hideModal('folderModal');
+                    document.getElementById('folderForm').reset();
+                    loadFiles(currentFolder);
+                } else {
+                    const error = await response.json();
+                    alert(error.error || 'Erro ao criar pasta');
+                }
+            } catch (error) {
+                console.error('Erro ao criar pasta:', error);
+                alert('Erro ao criar pasta');
+            }
+        });
+    }
+}
+
 // === GERENCIAMENTO DE MODALS ===
 function showModal(modalId) {
     document.getElementById(modalId).style.display = 'block';
@@ -700,4 +1024,13 @@ async function logout() {
         console.error('Erro ao fazer logout:', error);
         window.location.href = '/login';
     }
+}
+
+// === UTILIDADES ===
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
