@@ -679,16 +679,43 @@ app.use(helmet({
 app.use(compression());
 app.use(cors());
 
-// Configuração do Express
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Configuração do Express com otimizações para Termux
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static('public'));
+
+// Configurações de timeout otimizadas para Termux
+app.use((req, res, next) => {
+  // Timeout aumentado para uploads/downloads grandes
+  req.setTimeout(600000); // 10 minutos
+  res.setTimeout(600000);
+  
+  // Headers de performance
+  res.setHeader('X-Powered-By', 'Cloud-Termux');
+  res.setHeader('Keep-Alive', 'timeout=300, max=1000');
+  
+  next();
+});
 app.use(fileUpload({
   createParentPath: true,
-  limits: { fileSize: 10 * 1024 * 1024 * 1024 }, // 10GB limite (sem limite prático)
+  limits: { 
+    fileSize: 50 * 1024 * 1024 * 1024, // 50GB limite (sem limite prático)
+    files: 10, // Múltiplos arquivos simultâneos
+    parts: 1000,
+    fieldSize: 2 * 1024 * 1024 // 2MB para campos
+  },
   useTempFiles: true,
   tempFileDir: path.join(__dirname, 'temp'), // Usar pasta local ao invés de /tmp/
-  debug: false
+  uploadTimeout: 600000, // 10 minutos timeout
+  debug: false,
+  // Configurações otimizadas para Termux
+  parseNested: true,
+  preserveExtension: 4,
+  safeFileNames: true,
+  abortOnLimit: false,
+  responseOnLimit: 'Arquivo muito grande',
+  // Buffer otimizado para melhor throughput
+  highWaterMark: 2 * 1024 * 1024 // 2MB buffer
 }));
 
 // Sessões
@@ -897,19 +924,63 @@ app.post('/api/downloads', requireAuth, (req, res) => {
     return res.status(400).json({ error: 'URL é obrigatória' });
   }
   
+  // Validar URL
   try {
-    // Extrair nome do arquivo da URL
-    let filename = path.basename(new URL(url).pathname);
-    if (!filename || filename === '/') {
-      filename = 'download_' + Date.now();
-    }
-    
-    const result = dataManager.addDownload(req.session.user.id, url, filename, filename);
-    
-    // Iniciar download
-    startDownload(result.lastInsertRowid, url);
-    
-    res.json({ success: true, downloadId: result.lastInsertRowid });
+    new URL(url);
+  } catch (error) {
+    return res.status(400).json({ error: 'URL inválida' });
+  }
+  
+  try {
+    // Primeiro, obter informações do arquivo
+    getFileInfo(url)
+      .then(fileInfo => {
+        // Criar download com informações corretas
+        const result = dataManager.addDownload(
+          req.session.user.id, 
+          fileInfo.finalUrl, 
+          fileInfo.filename, 
+          fileInfo.filename
+        );
+        
+        // Atualizar com informações do arquivo
+        dataManager.updateDownload(result.lastInsertRowid, {
+          file_size: fileInfo.fileSize,
+          original_filename: fileInfo.filename
+        });
+        
+        // Iniciar download
+        startDownload(result.lastInsertRowid, fileInfo.finalUrl);
+        
+        res.json({ 
+          success: true, 
+          downloadId: result.lastInsertRowid,
+          filename: fileInfo.filename,
+          fileSize: fileInfo.fileSize
+        });
+      })
+      .catch(error => {
+        console.error('Erro ao analisar URL:', error);
+        
+        // Fallback: criar download mesmo sem informações completas
+        let filename = path.basename(new URL(url).pathname);
+        if (!filename || filename === '/') {
+          filename = 'download_' + Date.now() + '.bin';
+        }
+        
+        const result = dataManager.addDownload(req.session.user.id, url, filename, filename);
+        
+        // Tentar iniciar download mesmo assim
+        startDownload(result.lastInsertRowid, url);
+        
+        res.json({ 
+          success: true, 
+          downloadId: result.lastInsertRowid,
+          filename: filename,
+          warning: 'Não foi possível obter informações completas do arquivo. Download iniciado.'
+        });
+      });
+      
   } catch (error) {
     console.error('Erro ao criar download:', error);
     res.status(500).json({ error: 'Erro ao criar download' });
@@ -926,13 +997,14 @@ app.post('/api/downloads/:id/pause', requireAuth, (req, res) => {
       return res.status(404).json({ error: 'Download não encontrado' });
     }
     
-    // Atualizar status
-    dataManager.updateDownload(downloadId, { status: 'paused' });
+    if (download.status !== 'downloading') {
+      return res.status(400).json({ error: 'Download não está ativo para ser pausado' });
+    }
     
     // Pausar download
     pauseDownload(downloadId);
     
-    res.json({ success: true });
+    res.json({ success: true, message: 'Download pausado' });
   } catch (error) {
     console.error('Erro ao pausar download:', error);
     res.status(500).json({ error: 'Erro ao pausar download' });
@@ -949,13 +1021,20 @@ app.post('/api/downloads/:id/resume', requireAuth, (req, res) => {
       return res.status(404).json({ error: 'Download não encontrado' });
     }
     
+    if (download.status !== 'paused' && download.status !== 'error') {
+      return res.status(400).json({ error: 'Download não pode ser resumido' });
+    }
+    
     // Atualizar status
-    dataManager.updateDownload(downloadId, { status: 'downloading' });
+    dataManager.updateDownload(downloadId, { 
+      status: 'downloading',
+      error_message: null 
+    });
     
     // Resumir download
     resumeDownload(downloadId, download.url, download.downloaded_size || 0);
     
-    res.json({ success: true });
+    res.json({ success: true, message: 'Download resumido' });
   } catch (error) {
     console.error('Erro ao resumir download:', error);
     res.status(500).json({ error: 'Erro ao resumir download' });
@@ -977,10 +1056,17 @@ app.delete('/api/downloads/:id', requireAuth, (req, res) => {
     
     // Deletar arquivo se existir
     if (download.file_path && fs.existsSync(download.file_path)) {
-      fs.unlinkSync(download.file_path);
+      try {
+        fs.unlinkSync(download.file_path);
+        console.log(`Arquivo de download removido: ${download.file_path}`);
+      } catch (unlinkError) {
+        console.error('Erro ao remover arquivo:', unlinkError);
+      }
     }
     
-    res.json({ success: true });
+    io.emit('download_cancelled', { downloadId });
+    
+    res.json({ success: true, message: 'Download cancelado e removido' });
   } catch (error) {
     console.error('Erro ao cancelar download:', error);
     res.status(500).json({ error: 'Erro ao cancelar download' });
@@ -1007,13 +1093,58 @@ app.get('/api/download/:id', requireAuth, (req, res) => {
       return res.status(404).json({ error: 'Arquivo não encontrado no disco' });
     }
     
-    // Configurar headers para download
+    // Headers otimizados para performance no Termux
     res.setHeader('Content-Disposition', `attachment; filename="${file.original_name}"`);
     res.setHeader('Content-Type', file.mimetype || 'application/octet-stream');
+    res.setHeader('Content-Length', file.size);
     
-    // Enviar arquivo
-    const fileStream = fs.createReadStream(file.path);
+    // Headers de cache para melhor performance
+    res.setHeader('Cache-Control', 'public, max-age=31536000'); // 1 ano
+    res.setHeader('Last-Modified', new Date(file.created_at).toUTCString());
+    
+    // Headers de compressão se suportado
+    res.setHeader('Accept-Ranges', 'bytes');
+    
+    // Configurações otimizadas para Termux
+    const streamOptions = {
+      highWaterMark: 1024 * 1024, // Buffer de 1MB para melhor throughput
+      autoClose: true,
+      emitClose: true
+    };
+    
+    // Suporte a Range requests para downloads resumíveis
+    const range = req.headers.range;
+    if (range) {
+      const parts = range.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : file.size - 1;
+      const chunksize = (end - start) + 1;
+      
+      res.status(206); // Partial Content
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${file.size}`);
+      res.setHeader('Content-Length', chunksize);
+      
+      streamOptions.start = start;
+      streamOptions.end = end;
+    }
+    
+    // Stream otimizado
+    const fileStream = fs.createReadStream(file.path, streamOptions);
+    
+    // Error handling
+    fileStream.on('error', (error) => {
+      console.error('Erro no stream de arquivo:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Erro ao ler arquivo' });
+      }
+    });
+    
+    // Pipeline otimizado para melhor performance
     fileStream.pipe(res);
+    
+    res.on('close', () => {
+      fileStream.destroy();
+    });
     
   } catch (error) {
     console.error('Erro ao fazer download:', error);
@@ -1246,6 +1377,109 @@ function formatFileSize(bytes) {
 // === GERENCIAMENTO DE DOWNLOADS ===
 const activeDownloads = new Map();
 
+// Função para obter informações do arquivo via HTTP HEAD
+function getFileInfo(url, maxRedirects = 5) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(url);
+    const isHttps = parsedUrl.protocol === 'https:';
+    const httpModule = isHttps ? https : require('http');
+    
+    let redirectCount = 0;
+    
+    function makeRequest(currentUrl) {
+      const urlObj = new URL(currentUrl);
+      const options = {
+        hostname: urlObj.hostname,
+        port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+        path: urlObj.pathname + urlObj.search,
+        method: 'HEAD',
+        headers: {
+          'User-Agent': 'Cloud-Termux-Downloader/1.0',
+          'Accept': '*/*'
+        },
+        timeout: 10000
+      };
+      
+      const req = (urlObj.protocol === 'https:' ? https : require('http')).request(options, (res) => {
+        // Seguir redirecionamentos
+        if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+          if (redirectCount >= maxRedirects) {
+            reject(new Error('Muitos redirecionamentos'));
+            return;
+          }
+          redirectCount++;
+          const redirectUrl = new URL(res.headers.location, currentUrl).href;
+          console.log(`Redirecionando para: ${redirectUrl}`);
+          makeRequest(redirectUrl);
+          return;
+        }
+        
+        if (res.statusCode !== 200) {
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
+        }
+        
+        let filename = 'download_' + Date.now();
+        
+        // Tentar obter nome do Content-Disposition
+        if (res.headers['content-disposition']) {
+          const match = res.headers['content-disposition'].match(/filename[^;=\n]*=['"]?([^'";\n]*)['"]?/);
+          if (match && match[1]) {
+            filename = match[1].trim();
+          }
+        }
+        
+        // Se não encontrou, tentar extrair da URL final
+        if (filename.startsWith('download_')) {
+          const urlFilename = path.basename(urlObj.pathname);
+          if (urlFilename && urlFilename !== '/' && urlFilename.includes('.')) {
+            filename = urlFilename;
+          }
+        }
+        
+        // Se ainda não tem extensão, tentar deduzir do Content-Type
+        if (!filename.includes('.') && res.headers['content-type']) {
+          const contentType = res.headers['content-type'].split(';')[0];
+          const extensions = {
+            'application/pdf': '.pdf',
+            'application/zip': '.zip',
+            'application/x-zip-compressed': '.zip',
+            'image/jpeg': '.jpg',
+            'image/png': '.png',
+            'image/gif': '.gif',
+            'video/mp4': '.mp4',
+            'audio/mpeg': '.mp3',
+            'text/plain': '.txt',
+            'application/json': '.json',
+            'application/xml': '.xml'
+          };
+          
+          if (extensions[contentType]) {
+            filename += extensions[contentType];
+          }
+        }
+        
+        resolve({
+          finalUrl: currentUrl,
+          filename: filename,
+          fileSize: parseInt(res.headers['content-length'] || '0'),
+          contentType: res.headers['content-type'] || 'application/octet-stream',
+          acceptRanges: res.headers['accept-ranges'] === 'bytes'
+        });
+      });
+      
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('Timeout na requisição'));
+      });
+      req.end();
+    }
+    
+    makeRequest(url);
+  });
+}
+
 function startDownload(downloadId, downloadUrl) {
   if (activeDownloads.has(downloadId)) {
     return; // Download já está ativo
@@ -1268,15 +1502,34 @@ function startDownload(downloadId, downloadUrl) {
     userId: download.user_id,
     startTime: Date.now(),
     paused: false,
-    cancelled: false
+    cancelled: false,
+    request: null // Vamos armazenar a requisição aqui
   };
   
   activeDownloads.set(downloadId, downloadInfo);
   
-  performDownload(downloadId, downloadUrl, 0);
+  // Primeiro, obter informações do arquivo
+  getFileInfo(downloadUrl)
+    .then(fileInfo => {
+      console.log('Informações do arquivo:', fileInfo);
+      
+      // Atualizar dados no banco
+      dataManager.updateDownload(downloadId, {
+        filename: fileInfo.filename,
+        original_filename: fileInfo.filename,
+        file_size: fileInfo.fileSize
+      });
+      
+      // Iniciar o download
+      performDownload(downloadId, fileInfo.finalUrl, 0, fileInfo);
+    })
+    .catch(error => {
+      console.error('Erro ao obter informações do arquivo:', error);
+      handleDownloadError(downloadId, `Erro ao analisar URL: ${error.message}`);
+    });
 }
 
-function performDownload(downloadId, downloadUrl, resumeFrom = 0) {
+function performDownload(downloadId, downloadUrl, resumeFrom = 0, fileInfo = null) {
   const downloadInfo = activeDownloads.get(downloadId);
   if (!downloadInfo || downloadInfo.cancelled) return;
   
@@ -1291,7 +1544,7 @@ function performDownload(downloadId, downloadUrl, resumeFrom = 0) {
     const isHttps = parsedUrl.protocol === 'https:';
     const httpModule = isHttps ? https : require('http');
     
-    const fileName = download.filename;
+    const fileName = fileInfo ? fileInfo.filename : download.filename;
     const baseUploadPath = STORAGE_CONFIG.externalStorage ? STORAGE_CONFIG.externalPath : STORAGE_CONFIG.uploadsPath;
     const filePath = path.join(baseUploadPath, 'downloads_' + fileName);
     
@@ -1304,8 +1557,13 @@ function performDownload(downloadId, downloadUrl, resumeFrom = 0) {
       port: parsedUrl.port || (isHttps ? 443 : 80),
       path: parsedUrl.pathname + parsedUrl.search,
       headers: {
-        'User-Agent': 'Cloud-Termux-Downloader/1.0'
-      }
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'identity', // Não usar compressão para calcular progresso corretamente
+        'Connection': 'keep-alive'
+      },
+      timeout: 30000
     };
     
     // Adicionar cabeçalho Range para resumir download
@@ -1320,19 +1578,59 @@ function performDownload(downloadId, downloadUrl, resumeFrom = 0) {
     });
     
     const request = httpModule.request(options, (response) => {
+      // Seguir redirecionamentos automaticamente
+      if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
+        console.log(`Redirecionando download ${downloadId} para:`, response.headers.location);
+        const redirectUrl = new URL(response.headers.location, downloadUrl).href;
+        
+        // Atualizar URL no download info
+        downloadInfo.url = redirectUrl;
+        
+        // Fazer nova requisição com a URL redirecionada
+        setTimeout(() => {
+          performDownload(downloadId, redirectUrl, resumeFrom, fileInfo);
+        }, 100);
+        return;
+      }
+      
       if (response.statusCode === 206 || response.statusCode === 200) {
-        const totalSize = parseInt(response.headers['content-length'] || '0') + resumeFrom;
+        const contentLength = parseInt(response.headers['content-length'] || '0');
+        const totalSize = response.statusCode === 206 ? contentLength + resumeFrom : contentLength;
         let downloadedSize = resumeFrom;
         let lastSpeedCheck = Date.now();
         let lastDownloadedSize = resumeFrom;
         
+        // Atualizar nome do arquivo se vier do Content-Disposition
+        if (!fileInfo && response.headers['content-disposition']) {
+          const match = response.headers['content-disposition'].match(/filename[^;=\n]*=['"]?([^'";\n]*)['"]?/);
+          if (match && match[1]) {
+            const newFilename = match[1].trim();
+            dataManager.updateDownload(downloadId, {
+              filename: newFilename,
+              original_filename: newFilename
+            });
+          }
+        }
+        
         const fileStream = fs.createWriteStream(filePath, resumeFrom > 0 ? { flags: 'a' } : {});
+        
+        // Armazenar referência da requisição para poder cancelá-la
+        downloadInfo.request = request;
+        downloadInfo.response = response;
+        downloadInfo.fileStream = fileStream;
         
         response.on('data', (chunk) => {
           const info = activeDownloads.get(downloadId);
-          if (!info || info.cancelled || info.paused) {
+          if (!info || info.cancelled) {
             fileStream.destroy();
             request.destroy();
+            return;
+          }
+          
+          if (info.paused) {
+            // Se pausado, parar o stream mas manter a conexão
+            response.pause();
+            fileStream.end();
             return;
           }
           
@@ -1389,6 +1687,7 @@ function performDownload(downloadId, downloadUrl, resumeFrom = 0) {
             activeDownloads.delete(downloadId);
             
             io.emit('download_completed', { downloadId });
+            console.log(`Download ${downloadId} concluído:`, fileName);
           } catch (error) {
             console.error('Erro ao finalizar download:', error);
           }
@@ -1400,12 +1699,17 @@ function performDownload(downloadId, downloadUrl, resumeFrom = 0) {
         });
         
       } else {
-        handleDownloadError(downloadId, `Erro HTTP: ${response.statusCode}`);
+        handleDownloadError(downloadId, `Erro HTTP: ${response.statusCode} - ${response.statusMessage}`);
       }
     });
     
     request.on('error', (error) => {
       handleDownloadError(downloadId, `Erro de requisição: ${error.message}`);
+    });
+    
+    request.on('timeout', () => {
+      request.destroy();
+      handleDownloadError(downloadId, 'Timeout na requisição');
     });
     
     request.end();
@@ -1417,17 +1721,48 @@ function performDownload(downloadId, downloadUrl, resumeFrom = 0) {
 
 function pauseDownload(downloadId) {
   const downloadInfo = activeDownloads.get(downloadId);
-  if (downloadInfo) {
+  if (downloadInfo && !downloadInfo.paused && !downloadInfo.cancelled) {
+    console.log(`Pausando download ${downloadId}`);
     downloadInfo.paused = true;
+    
+    // Pausar response stream se existir
+    if (downloadInfo.response) {
+      downloadInfo.response.pause();
+    }
+    
+    // Fechar file stream se existir
+    if (downloadInfo.fileStream) {
+      downloadInfo.fileStream.end();
+    }
+    
+    // Destruir requisição
+    if (downloadInfo.request) {
+      downloadInfo.request.destroy();
+    }
+    
+    // Atualizar status no banco
+    dataManager.updateDownload(downloadId, { status: 'paused' });
+    
+    io.emit('download_paused', { downloadId });
   }
 }
 
 function resumeDownload(downloadId, downloadUrl, resumeFrom) {
   const downloadInfo = activeDownloads.get(downloadId);
-  if (downloadInfo) {
+  if (downloadInfo && downloadInfo.paused && !downloadInfo.cancelled) {
+    console.log(`Resumindo download ${downloadId} do byte ${resumeFrom}`);
     downloadInfo.paused = false;
+    
+    // Limpar referências antigas
+    downloadInfo.request = null;
+    downloadInfo.response = null;
+    downloadInfo.fileStream = null;
+    
+    // Recomeçar download do ponto onde parou
     performDownload(downloadId, downloadUrl, resumeFrom);
   } else {
+    // Se não está no mapa de downloads ativos, recriar
+    console.log(`Recriando download ${downloadId}`);
     startDownload(downloadId, downloadUrl);
   }
 }
@@ -1435,7 +1770,25 @@ function resumeDownload(downloadId, downloadUrl, resumeFrom) {
 function cancelDownload(downloadId) {
   const downloadInfo = activeDownloads.get(downloadId);
   if (downloadInfo) {
+    console.log(`Cancelando download ${downloadId}`);
     downloadInfo.cancelled = true;
+    downloadInfo.paused = false;
+    
+    // Parar response stream
+    if (downloadInfo.response) {
+      downloadInfo.response.destroy();
+    }
+    
+    // Fechar file stream
+    if (downloadInfo.fileStream) {
+      downloadInfo.fileStream.destroy();
+    }
+    
+    // Destruir requisição
+    if (downloadInfo.request) {
+      downloadInfo.request.destroy();
+    }
+    
     activeDownloads.delete(downloadId);
   }
 }
@@ -1454,6 +1807,16 @@ function handleDownloadError(downloadId, errorMessage) {
     console.error('Erro ao salvar erro de download:', error);
   }
 }
+
+// Configurações de performance para o servidor HTTP no Termux
+server.keepAliveTimeout = 300000; // 5 minutos
+server.headersTimeout = 310000; // Maior que keepAliveTimeout
+server.requestTimeout = 600000; // 10 minutos para uploads grandes
+server.timeout = 600000; // 10 minutos timeout geral
+server.maxConnections = 1000; // Conexões simultâneas
+
+// Configurações de buffer para melhor throughput
+server.maxHeaderSize = 16384; // 16KB para headers grandes
 
 // Inicializar aplicação
 server.listen(PORT, () => {
